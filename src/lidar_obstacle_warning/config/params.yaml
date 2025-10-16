@@ -1,0 +1,7 @@
+obstacle_detector_node:
+  ros__parameters:
+    scan_topic: "/scan"
+    map_topic: "/map"
+    pose_topic: "/amcl_pose"
+    distance_threshold: 0.5   # meters
+    lidar_offset: [0.0, 0.0, 0.0]  # x, y, yaw

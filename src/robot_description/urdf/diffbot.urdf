@@ -1,0 +1,312 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- This URDF was automatically created by SolidWorks to URDF Exporter! Originally created by Stephen Brawner (brawner@gmail.com) 
+     Commit Version: 1.6.0-4-g7f85cfe  Build Version: 1.6.7995.38578
+     For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
+<robot
+  name="diffbot">
+  <link
+    name="base_link">
+    <inertial>
+      <origin
+        xyz="3.0864E-17 3.0837E-17 0.15136"
+        rpy="0 0 0" />
+      <mass
+        value="2" />
+      <inertia
+        ixx="0.39588"
+        ixy="3.4212E-17"
+        ixz="-1.2166E-18"
+        iyy="0.39925"
+        iyz="1.5001E-17"
+        izz="0.39941" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://robot_description/meshes/base_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.79216 0.81961 0.93333 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://robot_description/meshes/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <link
+    name="wheel1">
+    <inertial>
+      <origin
+        xyz="5.9584E-17 4.3021E-16 -0.0075"
+        rpy="0 0 0" />
+      <mass
+        value="0.05" />
+      <inertia
+        ixx="4.575E-05"
+        ixy="-8.0262E-21"
+        ixz="-8.9129E-23"
+        iyy="4.575E-05"
+        iyz="5.0665E-24"
+        izz="8.8324E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+    <geometry>
+    <mesh
+      filename="package://robot_description/meshes/wheel1.STL" />
+    </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.79216 0.81961 0.93333 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://robot_description/meshes/wheel1.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="body_wheel1"
+    type="fixed">
+    <origin
+      xyz="0 0.135 0.02"
+      rpy="1.5708 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="wheel1" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+  <link
+    name="wheel2">
+    <inertial>
+      <origin
+        xyz="8.2833E-17 4.4062E-16 0.0075"
+        rpy="0 0 0" />
+      <mass
+        value="0.05" />
+      <inertia
+        ixx="4.575E-05"
+        ixy="4.4189E-22"
+        ixz="-2.068E-23"
+        iyy="4.575E-05"
+        iyz="2.068E-23"
+        izz="8.8324E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+    <geometry>
+      <mesh
+      filename="package://robot_description/meshes/wheel2.STL" />
+    </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.79216 0.81961 0.93333 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://robot_description/meshes/wheel2.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="body_wheel2"
+    type="fixed">
+    <origin
+      xyz="0 -0.135 0.02"
+      rpy="1.5708 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="wheel2" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+  <link
+    name="ball1">
+    <inertial>
+      <origin
+        xyz="1.3878E-17 0 6.4701E-17"
+        rpy="0 0 0" />
+      <mass
+        value="0.05" />
+      <inertia
+        ixx="9.6619E-06"
+        ixy="1.3336E-54"
+        ixz="0"
+        iyy="9.6619E-06"
+        iyz="0"
+        izz="9.6619E-06" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://robot_description/meshes/ball1.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.79216 0.81961 0.93333 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://robot_description/meshes/ball1.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="body_ball1"
+    type="fixed">
+    <origin
+      xyz="-0.12 0 0"
+      rpy="1.5708 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="ball1" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+  <link
+    name="ball2">
+    <inertial>
+      <origin
+        xyz="-1.3878E-17 0 5.1665E-19"
+        rpy="0 0 0" />
+      <mass
+        value="0.05" />
+      <inertia
+        ixx="9.6619E-06"
+        ixy="0"
+        ixz="0"
+        iyy="9.6619E-06"
+        iyz="0"
+        izz="9.6619E-06" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+    <geometry>
+      <mesh
+      filename="package://robot_description/meshes/ball2.STL" />
+    </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.79216 0.81961 0.93333 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://robot_description/meshes/ball2.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="body_ball2"
+    type="fixed">
+    <origin
+      xyz="0.12 0 0"
+      rpy="1.5708 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="ball2" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+  <link
+    name="ld19">
+    <inertial>
+      <origin
+        xyz="7.857E-05 -9.8109E-05 0.011224"
+        rpy="0 0 0" />
+      <mass
+        value="0.01" />
+      <inertia
+        ixx="2.139E-06"
+        ixy="3.3875E-08"
+        ixz="4.1899E-09"
+        iyy="2.2143E-06"
+        iyz="-4.8463E-09"
+        izz="3.8781E-06" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://robot_description/meshes/ld19.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.75294 0.75294 0.75294 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://robot_description/meshes/ld19.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="body_ld19"
+    type="fixed">
+    <origin
+      xyz="-3.3623E-05 -0.0077057 0.3002"
+      rpy="0 0 3.1329" />
+    <parent
+      link="base_link" />
+    <child
+      link="ld19" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+</robot>
