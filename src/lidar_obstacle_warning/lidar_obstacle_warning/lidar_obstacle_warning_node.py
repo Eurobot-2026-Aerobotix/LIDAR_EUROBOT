@@ -3,7 +3,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import OccupancyGrid
-from std_msgs.msg import Float32MultiArray
+from geometry_msgs.msg import Vector3
 from geometry_msgs.msg import PoseStamped
 from visualization_msgs.msg import Marker
 import math
@@ -14,7 +14,7 @@ class ObstacleTracker(Node):
         super().__init__('obstacle_tracker')
         self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
         self.create_subscription(OccupancyGrid, '/map', self.map_callback, 1)
-        self.create_subscription(Float32MultiArray, '/robot_pose_raw', self.pose_callback, 10)
+        self.create_subscription(Vector3, '/robot_pose_raw', self.pose_callback, 10)
         self.obstacle_pub = self.create_publisher(PoseStamped, '/obstacle_relative', 10)
         self.close_pub = self.create_publisher(PoseStamped, '/obstacle_too_close', 10)
         self.marker_pub = self.create_publisher(Marker, '/obstacle_candidate_marker', 10)
@@ -54,10 +54,7 @@ class ObstacleTracker(Node):
         self.latest_map = msg
 
     def pose_callback(self, msg):
-        if len(msg.data) < 3:
-            self.get_logger().warn('Invalid pose data received')
-            return
-        self.current_pose = {'x': msg.data[0], 'y': msg.data[1], 'theta': msg.data[2]}
+        self.current_pose = {'x': msg.x, 'y': msg.y, 'theta': msg.z}
         
         # Reset tracking and delete marker
         self.tracking = False

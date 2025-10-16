@@ -3,7 +3,7 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float32MultiArray
 from tf2_ros import TransformBroadcaster
-from geometry_msgs.msg import TransformStamped
+from geometry_msgs.msg import TransformStamped, Vector3
 import math
 
 class RobotPoseTFBroadcaster(Node):
@@ -14,7 +14,7 @@ class RobotPoseTFBroadcaster(Node):
         self.got_pose = False
 
         self.subscription = self.create_subscription(
-            Float32MultiArray,
+            Vector3,
             'robot_pose_raw',
             self.pose_callback,
             10
@@ -23,10 +23,7 @@ class RobotPoseTFBroadcaster(Node):
         self.timer = self.create_timer(0.1, self.publish_tf)
 
     def pose_callback(self, msg):
-        if len(msg.data) < 3:
-            self.get_logger().warn("Invalid pose message, expected [x, y, theta]")
-            return
-        self.latest_pose = msg.data[:3]
+        self.latest_pose = [msg.x, msg.y, msg.z]
         self.got_pose = True
 
     def publish_tf(self):
