@@ -7,11 +7,11 @@ import os
 def generate_launch_description():
     urdf_path = os.path.join(
         os.environ['HOME'],
-        'eurobot_ws/src/robot_description/urdf/diffbot.urdf'
+        'EUROBOT/LIDAR_EUROBOT/src/robot_description/urdf/diffbot.urdf'
     )
     rviz_config = os.path.join(
         os.environ['HOME'],
-        'eurobot_ws/src/lidar_obstacle_warning/rviz/warning.rviz'
+        'EUROBOT/LIDAR_EUROBOT/src/lidar_obstacle_warning/rviz/warning.rviz'
     )
     rviz_node = Node(
         package='rviz2',
