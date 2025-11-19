@@ -15,7 +15,7 @@ class ObstacleTracker(Node):
         super().__init__('obstacle_tracker')
         self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
         self.create_subscription(OccupancyGrid, '/map', self.map_callback, 1)
-        self.create_subscription(Vector3, '/robot_pose_raw', self.pose_callback, 10)
+        self.create_subscription(Vector3, '/robot_pose', self.pose_callback, 10)
         self.obstacle_pub = self.create_publisher(PoseStamped, '/obstacle_relative', 10)
         self.close_pub = self.create_publisher(Int32, '/obstacle_too_close', 10)
         self.marker_pub = self.create_publisher(Marker, '/obstacle_candidate_marker', 10)

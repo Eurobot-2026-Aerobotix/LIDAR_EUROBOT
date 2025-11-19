@@ -81,7 +81,7 @@ def generate_launch_description():
         parameters=[{
             'scan_topic': '/scan',
             'map_topic': '/map',
-            'pose_topic': '/robot_pose_raw',
+            'pose_topic': '/robot_pose',
             'distance_threshold': 0.5,
             'lidar_offset': [0.0, 0.0, 0.0]
         }],
@@ -92,7 +92,7 @@ def generate_launch_description():
         executable='map_server',
         name='map_server',
         output='screen',
-        parameters=[{'yaml_filename': os.path.join(os.environ['HOME'], 'eurobot_ws/src/euro_ros_map/map.yaml')}]
+        parameters=[{'yaml_filename': os.path.join(os.environ['HOME'], 'EUROBOT/LIDAR_EUROBOT/src/euro_ros_map/map.yaml')}]
     )
 
     lifecycle_manager = Node(
