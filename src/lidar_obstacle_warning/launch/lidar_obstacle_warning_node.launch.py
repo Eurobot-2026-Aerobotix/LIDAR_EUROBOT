@@ -7,11 +7,11 @@ import os
 def generate_launch_description():
     urdf_path = os.path.join(
         os.environ['HOME'],
-        'EUROBOT/LIDAR_EUROBOT/src/robot_description/urdf/diffbot.urdf'
+        'LIDAR_EUROBOT/src/robot_description/urdf/diffbot.urdf'
     )
     rviz_config = os.path.join(
         os.environ['HOME'],
-        'EUROBOT/LIDAR_EUROBOT/src/lidar_obstacle_warning/rviz/warning.rviz'
+        'LIDAR_EUROBOT/src/lidar_obstacle_warning/rviz/warning.rviz'
     )
     rviz_node = Node(
         package='rviz2',
@@ -92,7 +92,7 @@ def generate_launch_description():
         executable='map_server',
         name='map_server',
         output='screen',
-        parameters=[{'yaml_filename': os.path.join(os.environ['HOME'], 'EUROBOT/LIDAR_EUROBOT/src/euro_ros_map/map.yaml')}]
+        parameters=[{'yaml_filename': os.path.join(os.environ['HOME'], 'LIDAR_EUROBOT/src/euro_ros_map/map.yaml')}]
     )
 
     lifecycle_manager = Node(

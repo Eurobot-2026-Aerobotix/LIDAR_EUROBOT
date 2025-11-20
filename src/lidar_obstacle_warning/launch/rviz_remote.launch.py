@@ -7,7 +7,7 @@ def generate_launch_description():
     # Use the SAME RViz config as the working launch file
     rviz_config = os.path.join(
         os.environ['HOME'],
-        'EUROBOT/LIDAR_EUROBOT/src/lidar_obstacle_warning/rviz/warning.rviz'
+        'LIDAR_EUROBOT/src/lidar_obstacle_warning/rviz/warning.rviz'
     )
     
     # RViz2 node for remote visualization

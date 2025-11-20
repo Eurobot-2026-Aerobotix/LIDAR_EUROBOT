@@ -6,7 +6,7 @@ import os
 def generate_launch_description():
     urdf_path = os.path.join(
         os.environ['HOME'],
-        'EUROBOT/LIDAR_EUROBOT/src/robot_description/urdf/diffbot.urdf'
+        'LIDAR_EUROBOT/src/robot_description/urdf/diffbot.urdf'
     )
 
     # LIDAR node
@@ -82,7 +82,7 @@ def generate_launch_description():
         name='map_server',
         output='screen',
         parameters=[{
-            'yaml_filename': os.path.join(os.environ['HOME'], 'EUROBOT/LIDAR_EUROBOT/src/euro_ros_map/map.yaml'),
+            'yaml_filename': os.path.join(os.environ['HOME'], 'LIDAR_EUROBOT/src/euro_ros_map/map.yaml'),
             'use_sim_time': False
         }]
     )
