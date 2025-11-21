@@ -81,7 +81,7 @@ def generate_launch_description():
         parameters=[{
             'scan_topic': '/scan',
             'map_topic': '/map',
-            'pose_topic': '/robot_pose',
+            'pose_topic': '/robot_pose_raw',
             'distance_threshold': 0.5,
             'lidar_offset': [0.0, 0.0, 0.0]
         }],

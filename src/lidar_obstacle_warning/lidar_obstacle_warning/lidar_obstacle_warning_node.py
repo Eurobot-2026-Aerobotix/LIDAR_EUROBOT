@@ -6,7 +6,6 @@ from nav_msgs.msg import OccupancyGrid
 from geometry_msgs.msg import Vector3
 from geometry_msgs.msg import PoseStamped
 from visualization_msgs.msg import Marker
-from std_msgs.msg import Int32
 import math
 import numpy as np
 
@@ -15,20 +14,16 @@ class ObstacleTracker(Node):
         super().__init__('obstacle_tracker')
         self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
         self.create_subscription(OccupancyGrid, '/map', self.map_callback, 1)
-        self.create_subscription(Vector3, '/robot_pose', self.pose_callback, 10)
+        self.create_subscription(Vector3, '/robot_pose_raw', self.pose_callback, 10)
         self.obstacle_pub = self.create_publisher(PoseStamped, '/obstacle_relative', 10)
-        self.close_pub = self.create_publisher(Int32, '/obstacle_too_close', 10)
+        self.close_pub = self.create_publisher(PoseStamped, '/obstacle_too_close', 10)
         self.marker_pub = self.create_publisher(Marker, '/obstacle_candidate_marker', 10)
-        
-        # Timer to continuously publish obstacle status
-        self.status_timer = self.create_timer(0.1, self.publish_obstacle_status)  # 10Hz
         
         self.latest_scan = None
         self.latest_map = None
         self.current_pose = None
         self.tracked_obstacle = None
         self.tracking = False
-        self.obstacle_detected = False  # Track if obstacle is too close
         self.close_threshold = 0.5
         self.cluster_eps = 0.1
         self.cluster_min_points = 3
@@ -131,15 +126,6 @@ class ObstacleTracker(Node):
         clusters = [np.array(c) for c in clusters if len(c) >= self.cluster_min_points]
         return clusters
 
-    def publish_obstacle_status(self):
-        """Continuously publish obstacle detection status (1 if detected, 0 if not)"""
-        msg = Int32()
-        if self.tracking and self.tracked_obstacle is not None and self.obstacle_detected:
-            msg.data = 1
-        else:
-            msg.data = 0
-        self.close_pub.publish(msg)
-
     def publish_obstacle(self, obs):
         pose_st = PoseStamped()
         pose_st.header.stamp = self.get_clock().now().to_msg()
@@ -150,9 +136,9 @@ class ObstacleTracker(Node):
         pose_st.pose.orientation.w = 1.0
         self.obstacle_pub.publish(pose_st)
         
-        # Check if obstacle is too close and update status
         dist = math.sqrt(obs['x']**2 + obs['y']**2)
-        self.obstacle_detected = dist < self.close_threshold
+        if dist < self.close_threshold:
+            self.close_pub.publish(pose_st)
 
     def publish_marker(self, obs):
         marker = Marker()
