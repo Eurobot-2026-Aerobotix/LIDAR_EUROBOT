@@ -82,8 +82,8 @@ class ObstacleTracker(Node):
         angle = scan.angle_min
         for r in scan.ranges:
             if scan.range_min < r < scan.range_max:
-                px = -r * math.cos(angle)
-                py = -r * math.sin(angle)
+                px = r * math.cos(angle)
+                py = r * math.sin(angle)
                 points.append([px, py])
             angle += scan.angle_increment
         return np.array(points)

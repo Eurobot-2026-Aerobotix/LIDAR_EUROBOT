@@ -33,7 +33,7 @@ def generate_launch_description():
         package='tf2_ros',
         executable='static_transform_publisher',
         name='ld19_to_base_laser',
-        arguments=['0','0','0','0','0','0','ld19','base_laser']
+        arguments=['0','0','0','3.141592','0','0','ld19','base_laser']
     )
 
     map_to_base_link = Node(
