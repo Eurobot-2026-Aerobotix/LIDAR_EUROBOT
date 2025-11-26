@@ -361,8 +361,9 @@ class ObstacleTracker(Node):
         dist = math.hypot(obs['x'], obs['y'])
         flag_msg = Int32()
         if dist < self.close_threshold:
-            self.close_pub.publish(self._pose_msg)
             flag_msg.data = 1
+            self.close_pub.publish(flag_msg)
+
         else:
             flag_msg.data = 0
             self.close_pub.publish(flag_msg)
