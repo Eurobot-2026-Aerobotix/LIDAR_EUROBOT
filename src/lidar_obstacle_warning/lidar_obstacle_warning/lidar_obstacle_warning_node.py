@@ -365,7 +365,7 @@ class ObstacleTracker(Node):
             flag_msg.data = 1
         else:
             flag_msg.data = 0
-            self.close_flag_pub.publish(flag_msg)
+            self.close_pub.publish(flag_msg)
     def publish_marker(self, obs: dict, use_map: bool = True):
         """
         Publish marker in 'map' frame if current_pose is available (no TF lookup needed in RViz).
