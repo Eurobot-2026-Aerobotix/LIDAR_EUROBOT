@@ -63,7 +63,7 @@ def generate_launch_description():
     # Obstacle detection node
     obstacle_detector = Node(
         package='lidar_obstacle_warning',
-        executable='lidar_obstacle_warning_node',
+        executable='lidar',
         name='obstacle_detector',
         output='screen',
         parameters=[{
