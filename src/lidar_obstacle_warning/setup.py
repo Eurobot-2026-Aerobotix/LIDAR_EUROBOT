@@ -26,9 +26,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'lidar_obstacle_warning_node = lidar_obstacle_warning.lidar_obstacle_warning_node:main',
+            'lidar = lidar_obstacle_warning.lidar_obstacle_warning_node:main',
             'robot_simulation = lidar_obstacle_warning.robot_simulation:main',
-            'robot_pose_tf_broadcaster = lidar_obstacle_warning.robot_pose_tf_broadcaster:main'
         ],
     },
 )
