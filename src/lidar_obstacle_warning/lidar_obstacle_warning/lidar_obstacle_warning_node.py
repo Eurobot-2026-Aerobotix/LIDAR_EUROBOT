@@ -12,6 +12,7 @@ from sensor_msgs.msg import LaserScan
 from visualization_msgs.msg import Marker
 from tf2_ros import TransformBroadcaster
 from rclpy.node import Node
+from std_msgs.msg import Int32
 
 
 class ObstacleTracker(Node):
@@ -41,7 +42,7 @@ class ObstacleTracker(Node):
         self.create_subscription(OccupancyGrid, '/map', self.map_callback, 1)
         self.create_subscription(Vector3, '/robot_pose_raw', self.pose_callback, 10)
         self.obstacle_pub = self.create_publisher(PoseStamped, '/obstacle_relative', 10)
-        self.close_pub = self.create_publisher(PoseStamped, '/obstacle_too_close', 10)
+        self.close_pub = self.create_publisher(Int32, '/emergency_break', 10)
         self.marker_pub = self.create_publisher(Marker, '/obstacle_candidate_marker', 10)
 
         # TF broadcaster (event-driven: publish on each new pose)
@@ -358,9 +359,13 @@ class ObstacleTracker(Node):
         self.obstacle_pub.publish(self._pose_msg)
 
         dist = math.hypot(obs['x'], obs['y'])
+        flag_msg = Int32()
         if dist < self.close_threshold:
             self.close_pub.publish(self._pose_msg)
-
+            flag_msg.data = 1
+        else:
+            flag_msg.data = 0
+            self.close_flag_pub.publish(flag_msg)
     def publish_marker(self, obs: dict, use_map: bool = True):
         """
         Publish marker in 'map' frame if current_pose is available (no TF lookup needed in RViz).
