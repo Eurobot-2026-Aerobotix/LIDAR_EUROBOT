@@ -36,20 +36,20 @@ def generate_launch_description():
         arguments=['0','0','0','3.141592','0','0','ld19','base_laser']
     )
 
-    map_to_base_link = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='map_to_laser_link',
-        arguments=['0','0','0','0','0','0','map','base_link']
-    )
+    # map_to_base_link = Node(
+    #     package='tf2_ros',
+    #     executable='static_transform_publisher',
+    #     name='map_to_laser_link',
+    #     arguments=['0','0','0','0','0','0','map','base_link']
+    # )
 
-    # Robot pose broadcaster
-    robot_pose_tf = Node(
-        package='lidar_obstacle_warning',
-        executable='robot_pose_tf_broadcaster',
-        name='robot_pose_tf_broadcaster',
-        output='screen'
-    )
+    # # Robot pose broadcaster
+    # robot_pose_tf = Node(
+    #     package='lidar_obstacle_warning',
+    #     executable='robot_pose_tf_broadcaster',
+    #     name='robot_pose_tf_broadcaster',
+    #     output='screen'
+    # )
 
     # Robot state publisher
     robot_state_pub = Node(
@@ -103,10 +103,10 @@ def generate_launch_description():
     return LaunchDescription([
         ldlidar_node,
         ld19_to_laser_tf_node,
-        map_to_base_link,
+        # map_to_base_link,
         map_server,
         robot_state_pub,
         lifecycle_manager,
-        robot_pose_tf,
+        # robot_pose_tf,
         obstacle_detector
     ])
