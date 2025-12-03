@@ -34,7 +34,7 @@ class ObstacleTracker(Node):
         self.scan_skip = 1  # process every Nth scan
         self.range_downsample = 1  # downsample LIDAR ranges (1 = keep all, 2 = every other)
         self.cluster_min_points = 5
-        self.cluster_min_distance = 0.04  # max distance between consecutive points in a cluster
+        self.cluster_min_distance = 0.03  # max distance between consecutive points in a cluster
         self.close_threshold = 0.5
 
         # Subscriptions / publishers
