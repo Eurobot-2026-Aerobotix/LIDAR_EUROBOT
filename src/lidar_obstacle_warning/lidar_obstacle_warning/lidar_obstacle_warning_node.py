@@ -185,13 +185,25 @@ class ObstacleTracker(Node):
         except Exception:
             arr = np.array(msg.data, dtype=np.int8).reshape((height, width))
         self.map_np = arr
+
+        # Extract origin position and yaw (orientation) and store in map_info.
+        ox = info.origin.position.x
+        oy = info.origin.position.y
+        q = info.origin.orientation
+        # Convert quaternion -> yaw robustly (handles general quaternion)
+        siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+        cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        yaw = math.atan2(siny_cosp, cosy_cosp)
+
         self.map_info = {
             'res': info.resolution,
             'width': width,
             'height': height,
-            'ox': info.origin.position.x,
-            'oy': info.origin.position.y,
+            'ox': ox,
+            'oy': oy,
+            'yaw': yaw,
         }
+        self.get_logger().debug(f"Received map: res={info.resolution} ox={ox} oy={oy} yaw={yaw} size={(width,height)}")
 
     def pose_callback(self, msg: Vector3):
         """
@@ -295,18 +307,30 @@ class ObstacleTracker(Node):
         height = self.map_info['height']
         ox = self.map_info['ox']
         oy = self.map_info['oy']
+        yaw = self.map_info.get('yaw', 0.0)
 
         ct = math.cos(pose['theta'])
         st = math.sin(pose['theta'])
 
+        # scan points in robot frame -> transform to world/map frame (mx,my)
         px = points[:, 0].astype(np.float64)
         py = points[:, 1].astype(np.float64)
-
         mx = pose['x'] + ct * px - st * py
         my = pose['y'] + st * px + ct * py
 
-        cx = np.floor((mx - ox) / res).astype(np.int32)
-        cy = np.floor((my - oy) / res).astype(np.int32)
+        # Translate world coordinates into map-local coordinates, taking into account map origin rotation.
+        # Map cells indexing: map_coords = R(-yaw) * (world - origin)  where R(yaw) is origin rotation.
+        dx = mx - ox
+        dy = my - oy
+        cos_y = math.cos(yaw)
+        sin_y = math.sin(yaw)
+        # R(-yaw) * [dx,dy] = [ cos(yaw)*dx + sin(yaw)*dy,
+        #                      -sin(yaw)*dx + cos(yaw)*dy ]
+        map_x = cos_y * dx + sin_y * dy
+        map_y = -sin_y * dx + cos_y * dy
+
+        cx = np.floor(map_x / res).astype(np.int32)
+        cy = np.floor(map_y / res).astype(np.int32)
 
         in_bounds = (cx >= 0) & (cx < width) & (cy >= 0) & (cy < height)
         if not np.any(in_bounds):
