@@ -14,6 +14,9 @@ from tf2_ros import TransformBroadcaster
 from rclpy.node import Node
 from std_msgs.msg import Int32
 
+# QoS imports for transient-local map subscription
+from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy, HistoryPolicy
+
 
 class ObstacleTracker(Node):
     """
@@ -34,12 +37,22 @@ class ObstacleTracker(Node):
         self.scan_skip = 1  # process every Nth scan
         self.range_downsample = 1  # downsample LIDAR ranges (1 = keep all, 2 = every other)
         self.cluster_min_points = 5
-        self.cluster_min_distance = 0.03  # max distance between consecutive points in a cluster
+        self.cluster_min_distance = 0.04  # max distance between consecutive points in a cluster
+        self.cluster_max_diameter = 0.3  # max distance between two furthest points in a cluster (None = no limit)
         self.close_threshold = 0.5
 
         # Subscriptions / publishers
+        # Use default QoS for scan
         self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
-        self.create_subscription(OccupancyGrid, '/map', self.map_callback, 1)
+
+        # Map: use transient-local durability so the map publisher's last message is available
+        # even if the subscriber starts after the publisher (common for static maps).
+        qos_map = QoSProfile(depth=1)
+        qos_map.reliability = ReliabilityPolicy.RELIABLE
+        qos_map.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        qos_map.history = HistoryPolicy.KEEP_LAST
+        self.create_subscription(OccupancyGrid, '/map', self.map_callback, qos_map)
+
         self.create_subscription(Vector3, '/robot_pose_raw', self.pose_callback, 10)
         self.obstacle_pub = self.create_publisher(PoseStamped, '/obstacle_relative', 10)
         self.close_pub = self.create_publisher(Int32, '/emergency_break', 10)
@@ -146,7 +159,8 @@ class ObstacleTracker(Node):
         # tracked_obstacle is stored when set from the pose-triggered detection.
         clusters = self.cluster_scan_ordered(pts,
                                             min_points=self.cluster_min_points,
-                                            max_gap=self.cluster_min_distance)
+                                            max_gap=self.cluster_min_distance,
+                                            max_diameter=self.cluster_max_diameter)
         if not clusters:
             # No clusters found in this scan. Do not clear the tracked obstacle here;
             # keep tracking active until the next pose-triggered re-evaluation.
@@ -246,7 +260,8 @@ class ObstacleTracker(Node):
 
         clusters = self.cluster_scan_ordered(filtered_pts,
                                             min_points=self.cluster_min_points,
-                                            max_gap=self.cluster_min_distance)
+                                            max_gap=self.cluster_min_distance,
+                                            max_diameter=self.cluster_max_diameter)
         if not clusters:
             # no clusters -> ensure marker removed
             self._publish_delete_marker()
@@ -354,7 +369,11 @@ class ObstacleTracker(Node):
 
         return filtered_points
 
-    def cluster_scan_ordered(self, points: np.ndarray, min_points: int = 3, max_gap: float = 0.1):
+    def cluster_scan_ordered(self, points: np.ndarray, min_points: int = 3, max_gap: float = 0.1, max_diameter: Optional[float] = None):
+        """
+        Cluster points in scan order. Optionally discard clusters whose diameter (max
+        distance between any two points in the cluster) exceeds max_diameter.
+        """
         if points.size == 0:
             return []
 
@@ -367,10 +386,36 @@ class ObstacleTracker(Node):
                 current.append(p_cur)
             else:
                 if len(current) >= min_points:
-                    clusters.append(np.array(current))
+                    cluster_arr = np.array(current)
+                    # If max_diameter is set, compute the cluster diameter and discard if too large.
+                    if max_diameter is None:
+                        clusters.append(cluster_arr)
+                    else:
+                        k = cluster_arr.shape[0]
+                        if k <= 1:
+                            diam = 0.0
+                        else:
+                            # pairwise distances (vectorized). O(k^2) memory/time for cluster size k.
+                            diffs = cluster_arr[:, None, :] - cluster_arr[None, :, :]  # (k,k,2)
+                            dists = np.hypot(diffs[..., 0], diffs[..., 1])
+                            diam = float(dists.max())
+                        if diam <= max_diameter:
+                            clusters.append(cluster_arr)
                 current = [p_cur]
         if len(current) >= min_points:
-            clusters.append(np.array(current))
+            cluster_arr = np.array(current)
+            if max_diameter is None:
+                clusters.append(cluster_arr)
+            else:
+                k = cluster_arr.shape[0]
+                if k <= 1:
+                    diam = 0.0
+                else:
+                    diffs = cluster_arr[:, None, :] - cluster_arr[None, :, :]
+                    dists = np.hypot(diffs[..., 0], diffs[..., 1])
+                    diam = float(dists.max())
+                if diam <= max_diameter:
+                    clusters.append(cluster_arr)
         return clusters
 
     #
