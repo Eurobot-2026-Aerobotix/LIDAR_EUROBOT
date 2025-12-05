@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Float32MultiArray
+from geometry_msgs.msg import Vector3
 from pynput import keyboard
 import math
 
 class RobotSimulation(Node):
     def __init__(self):
         super().__init__('robot_simulation')
-        self.publisher_ = self.create_publisher(Float32MultiArray, 'robot_pose_raw', 10)  # <--- Change type
+        self.publisher_ = self.create_publisher(Vector3, 'robot_pose_raw', 10)
 
         self.x = 0.0
         self.y = 0.0
@@ -20,8 +20,10 @@ class RobotSimulation(Node):
         listener.start()
 
     def publish_pose(self):
-        pose = Float32MultiArray()
-        pose.data = [self.x, self.y, self.theta]
+        pose = Vector3()
+        pose.x = float(self.x)
+        pose.y = float(self.y)
+        pose.z = float(self.theta)
         self.publisher_.publish(pose)
 
     def on_press(self, key):
