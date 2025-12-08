@@ -6,7 +6,7 @@ import os
 def generate_launch_description():
     urdf_path = os.path.join(
         os.environ['HOME'],
-        'LIDAR_EUROBOT/src/robot_description/urdf/diffbot.urdf'
+        'LIDAR_EUROBOT/src/torbag/urdf/TORBAG.urdf'
     )
 
     # LIDAR node
@@ -33,7 +33,7 @@ def generate_launch_description():
         package='tf2_ros',
         executable='static_transform_publisher',
         name='ld19_to_base_laser',
-        arguments=['0','0','0','3.141592','0','0','ld19','base_laser']
+        arguments=['0','0','0.3','0','0','0','base_link','base_laser']
     )
 
     # map_to_base_link = Node(
