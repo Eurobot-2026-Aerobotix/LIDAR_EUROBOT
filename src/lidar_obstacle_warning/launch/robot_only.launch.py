@@ -105,7 +105,7 @@ def generate_launch_description():
         ld19_to_laser_tf_node,
         # map_to_base_link,
         map_server,
-        robot_state_pub,
+        # robot_state_pub,
         lifecycle_manager,
         # robot_pose_tf,
         obstacle_detector

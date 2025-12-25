@@ -75,9 +75,6 @@ class ObstacleTracker(Node):
 
         # Reused message objects to avoid allocations
         self._pose_msg = PoseStamped()
-        self._pose_msg.header.frame_id = 'base_link'
-        self._pose_msg.pose.position.z = 0.0
-        self._pose_msg.pose.orientation.w = 1.0
 
         self._marker_msg = Marker()
         # header.frame_id will be set when publishing (map if current_pose available)
@@ -393,10 +390,9 @@ class ObstacleTracker(Node):
 
         valid_cx = cx[in_bounds]
         valid_cy = cy[in_bounds]
-
         occ_vals = self.map_np[valid_cy, valid_cx]
         free_mask = in_bounds.copy()
-        free_mask[in_bounds] = (occ_vals == 0)
+        free_mask[in_bounds] = np.isin(occ_vals, [0, -1])
 
         if not np.any(free_mask):
             return np.empty((0, 2), dtype=np.float32)
@@ -467,12 +463,28 @@ class ObstacleTracker(Node):
     # Publishing (reusing message objects)
     #
     def publish_obstacle(self, obs: dict):
+        # Now published in map frame if pose available
+        if self.current_pose is not None:
+            pose = self.current_pose
+            ct = math.cos(pose['theta'])
+            st = math.sin(pose['theta'])
+            mx = pose['x'] + ct * obs['x'] - st * obs['y']
+            my = pose['y'] + st * obs['x'] + ct * obs['y']
+            self._pose_msg.header.frame_id = 'map'
+            self._pose_msg.pose.position.x = float(mx)
+            self._pose_msg.pose.position.y = float(my)
+            dist = math.hypot(mx - pose['x'], my - pose['y'])
+        else:
+            self.get_logger().warning('No robot pose available')
+            
         self._pose_msg.header.stamp = self.get_clock().now().to_msg()
-        self._pose_msg.pose.position.x = float(obs['x'])
-        self._pose_msg.pose.position.y = float(obs['y'])
+        self._pose_msg.pose.position.z = 0.0
+        self._pose_msg.pose.orientation.x = 0.0
+        self._pose_msg.pose.orientation.y = 0.0
+        self._pose_msg.pose.orientation.z = 0.0
+        self._pose_msg.pose.orientation.w = 1.0
         self.obstacle_pub.publish(self._pose_msg)
 
-        dist = math.hypot(obs['x'], obs['y'])
         flag_msg = Int32()
         flag_msg.data = 1 if dist < self.close_threshold else 0
         self.close_pub.publish(flag_msg)
