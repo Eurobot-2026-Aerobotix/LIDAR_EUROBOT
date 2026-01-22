@@ -28,16 +28,24 @@ class RobotSimulation(Node):
 
     def on_press(self, key):
         try:
-            if key.char == 'z':
+            key_char = key.char if hasattr(key, 'char') else None
+            self.get_logger().info(f'Key pressed: {key_char}')
+            
+            # Support both AZERTY (zqsd) and QWERTY (wasd) layouts
+            if key_char in ['z', 'w']:  # Forward
                 self.x += self.step * math.cos(self.theta)
                 self.y += self.step * math.sin(self.theta)
-            elif key.char == 's':
+                self.get_logger().info('Moving forward')
+            elif key_char == 's':  # Backward
                 self.x -= self.step * math.cos(self.theta)
                 self.y -= self.step * math.sin(self.theta)
-            elif key.char == 'd':
-                self.theta += self.turn
-            elif key.char == 'q':
+                self.get_logger().info('Moving backward')
+            elif key_char == 'd':  # Turn right
                 self.theta -= self.turn
+                self.get_logger().info('Turning right')
+            elif key_char in ['q', 'a']:  # Turn left
+                self.theta += self.turn
+                self.get_logger().info('Turning left')
             self.publish_pose()
         except AttributeError:
             pass
