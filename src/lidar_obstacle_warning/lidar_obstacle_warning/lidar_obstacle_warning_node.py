@@ -41,7 +41,10 @@ class ObstacleTracker(Node):
         
         # Collision prediction time horizon (accounts for system latency)
         # Observed latency:  0.1m at 0.7m/s = ~0.143s
-        self.collision_prediction_time = 0.25  # seconds
+        self.collision_prediction_time = 0.143  # seconds
+        
+        # Number of intermediate steps to check along trajectory
+        self.prediction_steps = 3  # Check 3 intermediate positions + final position
         
         # History length for velocity estimation
         self.history_length = 5
@@ -125,7 +128,8 @@ class ObstacleTracker(Node):
             f'  Robot size: {self.robot_length}m × {self.robot_width}m\n'
             f'  Obstacle radius: {self.obstacle_collision_radius}m\n'
             f'  Detection threshold: {self.detection_threshold}m\n'
-            f'  Prediction time:  {self.collision_prediction_time}s'
+            f'  Prediction time:  {self.collision_prediction_time}s\n'
+            f'  Prediction steps: {self.prediction_steps}'
         )
 
     #
@@ -140,7 +144,7 @@ class ObstacleTracker(Node):
         with self.lock:
             pose_for_tf = None if self.current_pose is None else self.current_pose.copy()
 
-        if pose_for_tf is not None:
+        if pose_for_tf is not None: 
             stamp = None
             try:
                 stamp = msg.header.stamp
@@ -156,7 +160,7 @@ class ObstacleTracker(Node):
         except Exception: 
             self._process_scan(msg, current_scan_num)
 
-    def _process_scan(self, scan:  LaserScan, scan_num: int):
+    def _process_scan(self, scan: LaserScan, scan_num: int):
         with self.lock:
             tracking = self.tracking
             tracked_exists = self.tracked_obstacle is not None
@@ -248,7 +252,7 @@ class ObstacleTracker(Node):
             self.robot_pose_history.append({
                 'x': pose['x'],
                 'y': pose['y'],
-                'theta':  pose['theta'],
+                'theta': pose['theta'],
                 'timestamp': timestamp
             })
 
@@ -289,14 +293,14 @@ class ObstacleTracker(Node):
                 if filtered.shape[0] <= 1:
                     diam = 0.0
                 else:
-                    diffs = filtered[: , None, :] - filtered[None, : , :]
+                    diffs = filtered[:, None, :] - filtered[None, : , :]
                     dists = np.hypot(diffs[..., 0], diffs[..., 1])
                     diam = float(dists.max())
                 if diam > self.cluster_max_diameter:
                     continue
             accepted_clusters.append(filtered)
 
-        if not accepted_clusters:
+        if not accepted_clusters: 
             self._publish_delete_marker()
             return
 
@@ -329,7 +333,7 @@ class ObstacleTracker(Node):
         
         dt = history[-1]['timestamp'] - history[0]['timestamp']
         if dt < 1e-6:
-            return {'vx': 0.0, 'vy':  0.0, 'vtheta': 0.0}
+            return {'vx': 0.0, 'vy': 0.0, 'vtheta': 0.0}
         
         dx = history[-1]['x'] - history[0]['x']
         dy = history[-1]['y'] - history[0]['y']
@@ -338,7 +342,7 @@ class ObstacleTracker(Node):
         
         return {
             'vx': dx / dt,
-            'vy':  dy / dt,
+            'vy': dy / dt,
             'vtheta': dtheta / dt
         }
 
@@ -351,7 +355,7 @@ class ObstacleTracker(Node):
             current_pose = self.current_pose.copy() if self.current_pose else None
         
         if current_pose is None:
-            return {'vx': 0.0, 'vy': 0.0}
+            return {'vx':  0.0, 'vy': 0.0}
         
         # Convert obstacle positions from robot frame to map frame
         map_positions = []
@@ -360,7 +364,7 @@ class ObstacleTracker(Node):
             st = math.sin(current_pose['theta'])
             mx = current_pose['x'] + ct * h['x'] - st * h['y']
             my = current_pose['y'] + st * h['x'] + ct * h['y']
-            map_positions.append({'x': mx, 'y':  my, 'timestamp': h['timestamp']})
+            map_positions.append({'x': mx, 'y': my, 'timestamp': h['timestamp']})
         
         dt = map_positions[-1]['timestamp'] - map_positions[0]['timestamp']
         if dt < 1e-6:
@@ -427,7 +431,7 @@ class ObstacleTracker(Node):
         Returns:
             bool:  True if collision detected
         """
-        if robot_pos is None or obstacle_pos is None: 
+        if robot_pos is None or obstacle_pos is None:
             return False
         
         # Robot rectangle corners (centered at robot position)
@@ -463,7 +467,7 @@ class ObstacleTracker(Node):
         # Test 2: Is any corner inside the circle?
         for corner_x, corner_y in corners_map:
             dist = math.hypot(corner_x - cx, corner_y - cy)
-            if dist <= radius: 
+            if dist <= radius:
                 return True
         
         # Test 3: Does circle intersect any edge?
@@ -519,11 +523,11 @@ class ObstacleTracker(Node):
         return dist <= radius
 
     def collision_check_callback(self):
-        """Periodic callback to check for future collisions."""
+        """Periodic callback to check for future collisions along trajectory."""
         with self.lock:
             if not self.tracking or self.tracked_obstacle is None or self.current_pose is None:
                 # Clear visualization if not tracking
-                self.publish_collision_visualization(None, None, None, None, False)
+                self.publish_collision_visualization(None, None, [], [], False, None)
                 return
             obs = self.tracked_obstacle.copy()
             pose = self.current_pose.copy()
@@ -538,15 +542,33 @@ class ObstacleTracker(Node):
         
         # Only predict if obstacle is within detection threshold
         if current_distance > self.detection_threshold:
-            self.publish_collision_visualization(None, None, None, None, False)
+            self.publish_collision_visualization(None, None, [], [], False, None)
             return
         
-        # Predict future positions
-        robot_pred = self.predict_robot_position(self.collision_prediction_time)
-        obs_pred = self.predict_obstacle_position(self.collision_prediction_time)
+        # Check collision at intermediate steps along the trajectory
+        collision_detected = False
+        collision_time = None
         
-        # Check for collision
-        collision_detected = self.check_rectangle_circle_collision(robot_pred, obs_pred)
+        robot_trajectory = []
+        obstacle_trajectory = []
+        
+        # Check at prediction_steps intermediate points
+        for step in range(1, self.prediction_steps + 1):
+            t = (step / self.prediction_steps) * self.collision_prediction_time
+            
+            robot_pred = self.predict_robot_position(t)
+            obs_pred = self.predict_obstacle_position(t)
+            
+            if robot_pred is not None: 
+                robot_trajectory.append(robot_pred)
+            if obs_pred is not None:
+                obstacle_trajectory.append(obs_pred)
+            
+            # Check for collision at this time step
+            if self.check_rectangle_circle_collision(robot_pred, obs_pred):
+                collision_detected = True
+                collision_time = t
+                break  # Stop checking further if collision found
         
         # Publish emergency brake signal
         flag_msg = Int32()
@@ -556,19 +578,19 @@ class ObstacleTracker(Node):
         # Publish visualization
         self.publish_collision_visualization(
             pose, {'x': obs_map_x, 'y': obs_map_y},
-            robot_pred, obs_pred,
-            collision_detected
+            robot_trajectory, obstacle_trajectory,
+            collision_detected, collision_time
         )
         
         if collision_detected:
             self.get_logger().warn(
-                f'Collision predicted in {self.collision_prediction_time:.3f}s!  Emergency brake activated.'
+                f'Collision predicted in {collision_time:.3f}s!  Emergency brake activated.'
             )
 
-    def publish_collision_visualization(self, current_robot, current_obstacle, 
-                                       predicted_robot, predicted_obstacle, 
-                                       collision_detected):
-        """Publish visualization markers for collision geometry."""
+    def publish_collision_visualization(self, current_robot, current_obstacle,
+                                       robot_trajectory, obstacle_trajectory,
+                                       collision_detected, collision_time):
+        """Publish visualization markers for collision geometry and trajectories."""
         marker_id = 0
         
         # Clear all markers if no data
@@ -592,18 +614,24 @@ class ObstacleTracker(Node):
             (0.0, 0.0, 1.0, 0.5)  # Blue, semi-transparent
         )
         
-        # Predicted robot rectangle (faded green or red)
-        if predicted_robot is not None: 
-            color = (1.0, 0.0, 0.0, 0.3) if collision_detected else (0.0, 1.0, 0.0, 0.3)
+        # Predicted trajectory - robot rectangles (faded)
+        for i, robot_pos in enumerate(robot_trajectory):
+            alpha = 0.3 - (i * 0.05)  # Fade out gradually
+            if alpha < 0.1:
+                alpha = 0.1
+            color = (1.0, 0.0, 0.0, alpha) if collision_detected else (0.0, 1.0, 0.0, alpha)
             marker_id = self._publish_rectangle_marker(
-                predicted_robot, marker_id, 'predicted_robot', color
+                robot_pos, marker_id, f'predicted_robot_{i}', color
             )
         
-        # Predicted obstacle circle (faded blue or red)
-        if predicted_obstacle is not None:
-            color = (1.0, 0.0, 0.0, 0.3) if collision_detected else (0.0, 0.0, 1.0, 0.3)
+        # Predicted trajectory - obstacle circles (faded)
+        for i, obs_pos in enumerate(obstacle_trajectory):
+            alpha = 0.3 - (i * 0.05)  # Fade out gradually
+            if alpha < 0.1:
+                alpha = 0.1
+            color = (1.0, 0.0, 0.0, alpha) if collision_detected else (0.0, 0.0, 1.0, alpha)
             marker_id = self._publish_circle_marker(
-                predicted_obstacle, marker_id, 'predicted_obstacle', color
+                obs_pos, marker_id, f'predicted_obstacle_{i}', color
             )
 
     def _publish_rectangle_marker(self, pose, marker_id, ns, color):
@@ -636,7 +664,7 @@ class ObstacleTracker(Node):
         try:
             from rclpy.duration import Duration
             marker.lifetime = Duration(seconds=0.2).to_msg()
-        except Exception:
+        except Exception: 
             pass
         
         self.collision_viz_pub.publish(marker)
@@ -666,7 +694,7 @@ class ObstacleTracker(Node):
         marker.color.b = color[2]
         marker.color.a = color[3]
         
-        try: 
+        try:
             from rclpy.duration import Duration
             marker.lifetime = Duration(seconds=0.2).to_msg()
         except Exception:
@@ -679,7 +707,7 @@ class ObstacleTracker(Node):
     # Processing utilities (vectorized)
     #
     def scan_to_points(
-        self, scan: LaserScan, downsample:  int = 1, return_indices:  bool = False
+        self, scan: LaserScan, downsample: int = 1, return_indices: bool = False
     ) -> Tuple[np.ndarray, Optional[np.ndarray]]: 
         ranges = np.array(scan.ranges, dtype=np.float32)
         n = ranges.size
@@ -724,7 +752,7 @@ class ObstacleTracker(Node):
         if points.size == 0:
             return np.empty((0, 2), dtype=np.float32)
 
-        if self.map_np is None or self.latest_map_msg is None or not self.map_info:
+        if self.map_np is None or self.latest_map_msg is None or not self.map_info: 
             return points
 
         res = self.map_info['res']
@@ -794,7 +822,7 @@ class ObstacleTracker(Node):
                         accepted.append(cluster_arr)
                     else:
                         k = cluster_arr.shape[0]
-                        if k <= 1: 
+                        if k <= 1:
                             diam = 0.0
                         else:
                             diffs = cluster_arr[: , None, :] - cluster_arr[None, :, :]
@@ -847,7 +875,7 @@ class ObstacleTracker(Node):
         self._pose_msg.pose.orientation.w = 1.0
         self.obstacle_pub.publish(self._pose_msg)
 
-    def publish_marker(self, obs: dict, use_map: bool = True):
+    def publish_marker(self, obs: dict, use_map:  bool = True):
         m = self._marker_msg
         if use_map and (self.current_pose is not None):
             pose = self.current_pose
@@ -926,7 +954,7 @@ def main(args=None):
     node = ObstacleTracker()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt: 
+    except KeyboardInterrupt:
         pass
     finally:
         node.destroy_node()
