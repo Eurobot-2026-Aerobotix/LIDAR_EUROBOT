@@ -141,8 +141,18 @@ class ObstacleTracker(Node):
             self.scan_counter += 1
             current_scan_num = int(self.scan_counter)
 
-        with self.lock:
-            pose_for_tf = None if self.current_pose is None else self.current_pose.copy()
+        # Get scan timestamp for pose interpolation
+        scan_timestamp = None
+        try:
+            scan_timestamp = msg.header.stamp.sec + msg.header.stamp.nanosec / 1e9
+        except Exception:
+            scan_timestamp = self.get_clock().now().nanoseconds / 1e9
+
+        # Interpolate pose at scan timestamp for accurate transform
+        pose_for_tf = self.interpolate_pose(scan_timestamp)
+        if pose_for_tf is None:
+            with self.lock:
+                pose_for_tf = None if self.current_pose is None else self.current_pose.copy()
 
         if pose_for_tf is not None: 
             stamp = None
@@ -164,10 +174,22 @@ class ObstacleTracker(Node):
         with self.lock:
             tracking = self.tracking
             tracked_exists = self.tracked_obstacle is not None
-            current_pose_copy = None if self.current_pose is None else self.current_pose.copy()
 
         if not tracking or not tracked_exists:
             return
+
+        # Get interpolated pose at scan timestamp for accurate processing
+        scan_timestamp = None
+        try:
+            scan_timestamp = scan.header.stamp.sec + scan.header.stamp.nanosec / 1e9
+        except Exception:
+            scan_timestamp = self.get_clock().now().nanoseconds / 1e9
+        
+        interpolated_pose = self.interpolate_pose(scan_timestamp)
+        with self.lock:
+            current_pose_copy = interpolated_pose if interpolated_pose else (
+                None if self.current_pose is None else self.current_pose.copy()
+            )
 
         pts, _ = self.scan_to_points(scan, downsample=self.range_downsample, return_indices=True)
         if pts.size == 0:
@@ -201,10 +223,13 @@ class ObstacleTracker(Node):
         with self.lock:
             self.tracked_obstacle = {'x': float(best_centroid[0]), 'y': float(best_centroid[1])}
             timestamp = self.get_clock().now().nanoseconds / 1e9
+            # Store pose with measurement for correct velocity estimation
+            current_pose_copy = self.current_pose.copy() if self.current_pose else None
             self.obstacle_position_history.append({
                 'x': self.tracked_obstacle['x'],
                 'y': self.tracked_obstacle['y'],
-                'timestamp': timestamp
+                'timestamp': timestamp,
+                'pose': current_pose_copy  # Store pose at measurement time
             })
 
         self.publish_obstacle(self.tracked_obstacle)
@@ -312,14 +337,84 @@ class ObstacleTracker(Node):
             self.tracking = True
             self.current_pose = pose
             timestamp = self.get_clock().now().nanoseconds / 1e9
+            # Store pose with measurement for correct velocity estimation
             self.obstacle_position_history.append({
                 'x': self.tracked_obstacle['x'],
                 'y': self.tracked_obstacle['y'],
-                'timestamp': timestamp
+                'timestamp': timestamp,
+                'pose': pose.copy()  # Store pose at measurement time
             })
 
         self.publish_obstacle(self.tracked_obstacle)
         self.publish_marker(self.tracked_obstacle)
+
+    #
+    # Pose Interpolation for Timestamp Synchronization
+    #
+    def interpolate_pose(self, target_timestamp: float) -> Optional[dict]:
+        """
+        Interpolate robot pose at a given timestamp using linear interpolation.
+        
+        Args:
+            target_timestamp: The timestamp (in seconds) to interpolate the pose at
+            
+        Returns:
+            Interpolated pose dict with 'x', 'y', 'theta', 'timestamp' or None if not possible
+        """
+        with self.lock:
+            if len(self.robot_pose_history) < 2:
+                # Not enough history - return current pose if available
+                if len(self.robot_pose_history) == 1:
+                    return dict(self.robot_pose_history[0])
+                return None
+            history = list(self.robot_pose_history)
+        
+        # Find bracketing poses
+        pose_before = None
+        pose_after = None
+        
+        for i in range(len(history) - 1):
+            if history[i]['timestamp'] <= target_timestamp <= history[i + 1]['timestamp']:
+                pose_before = history[i]
+                pose_after = history[i + 1]
+                break
+        
+        # Handle edge cases: target is before or after all history
+        if pose_before is None:
+            if target_timestamp < history[0]['timestamp']:
+                # Target is before history - extrapolate backwards (limited)
+                pose_before = history[0]
+                pose_after = history[1] if len(history) > 1 else history[0]
+            else:
+                # Target is after history - extrapolate forwards (limited)
+                pose_before = history[-2] if len(history) > 1 else history[-1]
+                pose_after = history[-1]
+        
+        # Calculate interpolation factor
+        dt = pose_after['timestamp'] - pose_before['timestamp']
+        if dt < 1e-9:
+            return dict(pose_before)
+        
+        t = (target_timestamp - pose_before['timestamp']) / dt
+        # Clamp extrapolation to avoid wild estimates
+        t = max(-0.5, min(1.5, t))
+        
+        # Linear interpolation for x, y
+        x = pose_before['x'] + t * (pose_after['x'] - pose_before['x'])
+        y = pose_before['y'] + t * (pose_after['y'] - pose_before['y'])
+        
+        # Interpolate theta with proper angle wrapping
+        theta_diff = pose_after['theta'] - pose_before['theta']
+        theta_diff = math.atan2(math.sin(theta_diff), math.cos(theta_diff))
+        theta = pose_before['theta'] + t * theta_diff
+        theta = math.atan2(math.sin(theta), math.cos(theta))
+        
+        return {
+            'x': x,
+            'y': y,
+            'theta': theta,
+            'timestamp': target_timestamp
+        }
 
     #
     # Collision Prediction Methods
@@ -347,24 +442,40 @@ class ObstacleTracker(Node):
         }
 
     def estimate_obstacle_velocity(self):
-        """Estimate obstacle velocity from position history (convert to map frame)."""
+        """
+        Estimate obstacle velocity from position history (convert to map frame).
+        
+        FIXED: Now uses the correct robot pose for each historical measurement
+        instead of using the current pose for all measurements. This prevents
+        stationary obstacles from appearing to move when the robot moves/rotates.
+        """
         with self.lock:
             if len(self.obstacle_position_history) < 2:
                 return {'vx': 0.0, 'vy': 0.0}
             history = list(self.obstacle_position_history)
-            current_pose = self.current_pose.copy() if self.current_pose else None
-        
-        if current_pose is None:
-            return {'vx':  0.0, 'vy': 0.0}
         
         # Convert obstacle positions from robot frame to map frame
+        # using the CORRECT pose for each measurement timestamp
         map_positions = []
         for h in history:
-            ct = math.cos(current_pose['theta'])
-            st = math.sin(current_pose['theta'])
-            mx = current_pose['x'] + ct * h['x'] - st * h['y']
-            my = current_pose['y'] + st * h['x'] + ct * h['y']
+            # Use the stored pose from measurement time, or interpolate if not available
+            if 'pose' in h and h['pose'] is not None:
+                # Use the pose that was recorded with this measurement
+                pose_at_measurement = h['pose']
+            else:
+                # Fallback: interpolate pose at measurement timestamp
+                pose_at_measurement = self.interpolate_pose(h['timestamp'])
+                if pose_at_measurement is None:
+                    continue
+            
+            ct = math.cos(pose_at_measurement['theta'])
+            st = math.sin(pose_at_measurement['theta'])
+            mx = pose_at_measurement['x'] + ct * h['x'] - st * h['y']
+            my = pose_at_measurement['y'] + st * h['x'] + ct * h['y']
             map_positions.append({'x': mx, 'y': my, 'timestamp': h['timestamp']})
+        
+        if len(map_positions) < 2:
+            return {'vx': 0.0, 'vy': 0.0}
         
         dt = map_positions[-1]['timestamp'] - map_positions[0]['timestamp']
         if dt < 1e-6:
