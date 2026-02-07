@@ -19,7 +19,7 @@ def generate_launch_description():
         {'product_name': 'LDLiDAR_LD19'},
         {'topic_name': 'scan'},
         {'frame_id': 'base_laser'},
-        {'port_name': '/dev/ttyUSB0'},
+        {'port_name': '/dev/LIDAR'},
         {'port_baudrate': 230400},
         {'laser_scan_dir': True},
         {'enable_angle_crop_func': False},
@@ -27,7 +27,6 @@ def generate_launch_description():
         {'angle_crop_max': 225.0}
       ]
     )
-
     # Transform publishers
     ld19_to_laser_tf_node = Node(
         package='tf2_ros',
