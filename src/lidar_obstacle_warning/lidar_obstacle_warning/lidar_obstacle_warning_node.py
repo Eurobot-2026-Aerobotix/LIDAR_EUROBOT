@@ -49,6 +49,11 @@ class ObstacleTracker(Node):
         # History length for velocity estimation
         self.history_length = 5
         
+        # Low-pass filter for obstacle position (exponential moving average)
+        # alpha = 1.0 means no filtering, alpha = 0.1 means heavy smoothing
+        self.obstacle_filter_alpha = 0.4  # Smoothing factor (tune based on noise level)
+        self.filtered_obstacle = None  # Stores the filtered position
+        
         # Velocity histories
         self.robot_pose_history = deque(maxlen=self.history_length)
         self.obstacle_position_history = deque(maxlen=self.history_length)
@@ -129,7 +134,8 @@ class ObstacleTracker(Node):
             f'  Obstacle radius: {self.obstacle_collision_radius}m\n'
             f'  Detection threshold: {self.detection_threshold}m\n'
             f'  Prediction time:  {self.collision_prediction_time}s\n'
-            f'  Prediction steps: {self.prediction_steps}'
+            f'  Prediction steps: {self.prediction_steps}\n'
+            f'  Obstacle filter alpha: {self.obstacle_filter_alpha}'
         )
 
     #
@@ -217,11 +223,25 @@ class ObstacleTracker(Node):
             with self.lock:
                 self.tracking = False
                 self.tracked_obstacle = None
+                self.filtered_obstacle = None  # Reset filter when tracking stops
             self._publish_delete_marker()
             return
 
         with self.lock:
-            self.tracked_obstacle = {'x': float(best_centroid[0]), 'y': float(best_centroid[1])}
+            raw_x = float(best_centroid[0])
+            raw_y = float(best_centroid[1])
+            
+            # Apply low-pass filter (exponential moving average)
+            if self.filtered_obstacle is None:
+                # First measurement - initialize filter
+                self.filtered_obstacle = {'x': raw_x, 'y': raw_y}
+            else:
+                # EMA: filtered = alpha * new + (1 - alpha) * old
+                alpha = self.obstacle_filter_alpha
+                self.filtered_obstacle['x'] = alpha * raw_x + (1 - alpha) * self.filtered_obstacle['x']
+                self.filtered_obstacle['y'] = alpha * raw_y + (1 - alpha) * self.filtered_obstacle['y']
+            
+            self.tracked_obstacle = {'x': self.filtered_obstacle['x'], 'y': self.filtered_obstacle['y']}
             timestamp = self.get_clock().now().nanoseconds / 1e9
             # Store pose with measurement for correct velocity estimation
             current_pose_copy = self.current_pose.copy() if self.current_pose else None
@@ -333,7 +353,14 @@ class ObstacleTracker(Node):
         centroid = np.mean(largest, axis=0)
 
         with self.lock:
-            self.tracked_obstacle = {'x':  float(centroid[0]), 'y': float(centroid[1])}
+            raw_x = float(centroid[0])
+            raw_y = float(centroid[1])
+            
+            # Initialize or reset filter for new tracking target
+            # (pose_callback resets tracking, so this is a fresh detection)
+            self.filtered_obstacle = {'x': raw_x, 'y': raw_y}
+            
+            self.tracked_obstacle = {'x': self.filtered_obstacle['x'], 'y': self.filtered_obstacle['y']}
             self.tracking = True
             self.current_pose = pose
             timestamp = self.get_clock().now().nanoseconds / 1e9
