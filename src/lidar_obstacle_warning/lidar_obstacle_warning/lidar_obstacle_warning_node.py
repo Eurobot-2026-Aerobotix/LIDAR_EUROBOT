@@ -52,7 +52,7 @@ class ObstacleTracker(Node):
         # Low-pass filter for obstacle position (exponential moving average)
         # alpha = 1.0 means no filtering, alpha = 0.1 means heavy smoothing
         self.obstacle_filter_alpha = 0.4  # Smoothing factor (tune based on noise level)
-        self.filtered_obstacle = None  # Stores the filtered position
+        self.filtered_obstacle_map = None  # Stores filtered position in MAP frame (rotation-invariant)
         
         # Velocity histories
         self.robot_pose_history = deque(maxlen=self.history_length)
@@ -98,7 +98,7 @@ class ObstacleTracker(Node):
         self.map_np:  Optional[np.ndarray] = None
         self.map_info = {}
         self.current_pose = None
-        self.tracked_obstacle = None
+        self.tracked_obstacle = None  # Now stored in MAP frame (not robot frame)
         self.tracking = False
 
         # Helpers
@@ -177,14 +177,11 @@ class ObstacleTracker(Node):
             self._process_scan(msg, current_scan_num)
 
     def _process_scan(self, scan: LaserScan, scan_num: int):
-        with self.lock:
-            tracking = self.tracking
-            tracked_exists = self.tracked_obstacle is not None
-
-        if not tracking or not tracked_exists:
-            return
-
-        # Get interpolated pose at scan timestamp for accurate processing
+        """
+        Main scan processing - handles both detection and tracking.
+        Uses interpolated pose at scan timestamp for accuracy.
+        """
+        # Get interpolated pose at scan timestamp
         scan_timestamp = None
         try:
             scan_timestamp = scan.header.stamp.sec + scan.header.stamp.nanosec / 1e9
@@ -192,11 +189,33 @@ class ObstacleTracker(Node):
             scan_timestamp = self.get_clock().now().nanoseconds / 1e9
         
         interpolated_pose = self.interpolate_pose(scan_timestamp)
-        with self.lock:
-            current_pose_copy = interpolated_pose if interpolated_pose else (
-                None if self.current_pose is None else self.current_pose.copy()
-            )
+        if interpolated_pose is None:
+            with self.lock:
+                if self.current_pose is None:
+                    return  # No pose available yet
+                interpolated_pose = self.current_pose.copy()
 
+        # Check if we have map data for detection
+        has_map = self.latest_map_msg is not None and self.map_np is not None
+
+        with self.lock:
+            tracking = self.tracking
+            tracked_exists = self.tracked_obstacle is not None
+
+        if not tracking or not tracked_exists:
+            # Not tracking - try to detect new obstacle (requires map)
+            if has_map:
+                if self._detect_new_obstacle(scan, interpolated_pose):
+                    with self.lock:
+                        obs = self.tracked_obstacle.copy() if self.tracked_obstacle else None
+                    if obs:
+                        self.publish_obstacle(obs)
+                        self.publish_marker(obs)
+                else:
+                    self._publish_delete_marker()
+            return
+
+        # Currently tracking - update obstacle position
         pts, _ = self.scan_to_points(scan, downsample=self.range_downsample, return_indices=True)
         if pts.size == 0:
             return
@@ -209,51 +228,95 @@ class ObstacleTracker(Node):
         )
 
         if not accepted_clusters:
+            # No clusters found - try re-detection if we have map
+            if has_map:
+                with self.lock:
+                    self.tracking = False
+                    self.tracked_obstacle = None
+                    self.filtered_obstacle_map = None
+                if self._detect_new_obstacle(scan, interpolated_pose):
+                    with self.lock:
+                        obs = self.tracked_obstacle.copy() if self.tracked_obstacle else None
+                    if obs:
+                        self.publish_obstacle(obs)
+                        self.publish_marker(obs)
+                else:
+                    self._publish_delete_marker()
             return
 
+        # Convert tracked obstacle from map frame to robot frame for cluster matching
         with self.lock:
-            prev = np.array([self.tracked_obstacle['x'], self.tracked_obstacle['y']])
+            obs_map = self.tracked_obstacle.copy()
+        ct = math.cos(interpolated_pose['theta'])
+        st = math.sin(interpolated_pose['theta'])
+        # Map to robot frame: robot = R(-theta) * (map - pose)
+        dx = obs_map['x'] - interpolated_pose['x']
+        dy = obs_map['y'] - interpolated_pose['y']
+        prev_robot_x = ct * dx + st * dy   # cos(-theta)*dx - sin(-theta)*dy = cos(theta)*dx + sin(theta)*dy
+        prev_robot_y = -st * dx + ct * dy  # sin(-theta)*dx + cos(-theta)*dy = -sin(theta)*dx + cos(theta)*dy
+        prev = np.array([prev_robot_x, prev_robot_y])
+        
         centroids = [np.mean(c, axis=0) for c in accepted_clusters]
         dists = [np.linalg.norm(c - prev) for c in centroids]
         best_idx = int(np.argmin(dists))
         best_centroid = centroids[best_idx]
         best_dist = dists[best_idx]
 
-        if best_dist > self.scan_tracking_stop_distance: 
-            with self.lock:
-                self.tracking = False
-                self.tracked_obstacle = None
-                self.filtered_obstacle = None  # Reset filter when tracking stops
-            self._publish_delete_marker()
+        if best_dist > self.scan_tracking_stop_distance:
+            # Lost tracking - try re-detection if we have map
+            if has_map:
+                with self.lock:
+                    self.tracking = False
+                    self.tracked_obstacle = None
+                    self.filtered_obstacle_map = None
+                if self._detect_new_obstacle(scan, interpolated_pose):
+                    with self.lock:
+                        obs = self.tracked_obstacle.copy() if self.tracked_obstacle else None
+                    if obs:
+                        self.publish_obstacle(obs)
+                        self.publish_marker(obs)
+                else:
+                    self._publish_delete_marker()
+            else:
+                with self.lock:
+                    self.tracking = False
+                    self.tracked_obstacle = None
+                    self.filtered_obstacle_map = None
+                self._publish_delete_marker()
             return
 
+        # Update tracked obstacle with filtering in MAP FRAME
+        # This ensures robot rotation doesn't cause position errors
         with self.lock:
             raw_x = float(best_centroid[0])
             raw_y = float(best_centroid[1])
             
-            # Apply low-pass filter (exponential moving average)
-            if self.filtered_obstacle is None:
-                # First measurement - initialize filter
-                self.filtered_obstacle = {'x': raw_x, 'y': raw_y}
-            else:
-                # EMA: filtered = alpha * new + (1 - alpha) * old
-                alpha = self.obstacle_filter_alpha
-                self.filtered_obstacle['x'] = alpha * raw_x + (1 - alpha) * self.filtered_obstacle['x']
-                self.filtered_obstacle['y'] = alpha * raw_y + (1 - alpha) * self.filtered_obstacle['y']
+            # Convert raw measurement from robot frame to map frame
+            raw_map_x = interpolated_pose['x'] + ct * raw_x - st * raw_y
+            raw_map_y = interpolated_pose['y'] + st * raw_x + ct * raw_y
             
-            self.tracked_obstacle = {'x': self.filtered_obstacle['x'], 'y': self.filtered_obstacle['y']}
+            # Apply low-pass filter in map frame (rotation-invariant)
+            alpha = self.obstacle_filter_alpha
+            if self.filtered_obstacle_map is None:
+                self.filtered_obstacle_map = {'x': raw_map_x, 'y': raw_map_y}
+            else:
+                self.filtered_obstacle_map['x'] = alpha * raw_map_x + (1 - alpha) * self.filtered_obstacle_map['x']
+                self.filtered_obstacle_map['y'] = alpha * raw_map_y + (1 - alpha) * self.filtered_obstacle_map['y']
+            
+            # Store tracked_obstacle in MAP FRAME
+            self.tracked_obstacle = {'x': self.filtered_obstacle_map['x'], 'y': self.filtered_obstacle_map['y']}
+            
             timestamp = self.get_clock().now().nanoseconds / 1e9
-            # Store pose with measurement for correct velocity estimation
-            current_pose_copy = self.current_pose.copy() if self.current_pose else None
+            # Store map-frame position in history (no pose needed for conversion)
             self.obstacle_position_history.append({
                 'x': self.tracked_obstacle['x'],
                 'y': self.tracked_obstacle['y'],
-                'timestamp': timestamp,
-                'pose': current_pose_copy  # Store pose at measurement time
+                'timestamp': timestamp
             })
+            obs = self.tracked_obstacle.copy()
 
-        self.publish_obstacle(self.tracked_obstacle)
-        self.publish_marker(self.tracked_obstacle, use_map=False)
+        self.publish_obstacle(obs)
+        self.publish_marker(obs)
 
     def map_callback(self, msg: OccupancyGrid):
         self.latest_map_msg = msg
@@ -287,13 +350,12 @@ class ObstacleTracker(Node):
         }
 
     def pose_callback(self, msg: Vector3):
+        """Only updates pose and history - scan_callback handles all processing."""
         pose = {'x': float(msg.x), 'y': float(msg.y), 'theta': float(msg.z)}
+        timestamp = self.get_clock().now().nanoseconds / 1e9
         
         with self.lock:
-            self.tracking = False
-            self.tracked_obstacle = None
             self.current_pose = pose
-            timestamp = self.get_clock().now().nanoseconds / 1e9
             self.robot_pose_history.append({
                 'x': pose['x'],
                 'y': pose['y'],
@@ -303,22 +365,14 @@ class ObstacleTracker(Node):
 
         self._send_transform(pose)
 
-        if self.latest_scan is None or self.latest_map_msg is None:
-            return
-
-        with self.lock:
-            scan_num = int(self.scan_counter)
-
-        try:
-            self.pool.submit(self._process_pose_trigger, self.latest_scan, pose, scan_num)
-        except Exception:
-            self._process_pose_trigger(self.latest_scan, pose, scan_num)
-
-    def _process_pose_trigger(self, scan: LaserScan, pose: dict, scan_num: int):
+    def _detect_new_obstacle(self, scan: LaserScan, pose: dict) -> bool:
+        """
+        Attempt to detect a new obstacle from scratch using map filtering.
+        Returns True if a new obstacle was detected and tracking started.
+        """
         pts, idxs = self.scan_to_points(scan, downsample=self.range_downsample, return_indices=True)
         if pts.size == 0:
-            self._publish_delete_marker()
-            return
+            return False
 
         clusters, _ = self.cluster_scan_ordered(
             pts,
@@ -327,27 +381,26 @@ class ObstacleTracker(Node):
             max_diameter=None,
         )
 
-        accepted_clusters:  List[np.ndarray] = []
+        accepted_clusters: List[np.ndarray] = []
         for c in clusters:
             filtered = self.filter_free_space(c, pose)
             if filtered.shape[0] != c.shape[0]:
                 continue
             if filtered.shape[0] < self.cluster_min_points:
                 continue
-            if self.cluster_max_diameter is not None: 
+            if self.cluster_max_diameter is not None:
                 if filtered.shape[0] <= 1:
                     diam = 0.0
                 else:
-                    diffs = filtered[:, None, :] - filtered[None, : , :]
+                    diffs = filtered[:, None, :] - filtered[None, :, :]
                     dists = np.hypot(diffs[..., 0], diffs[..., 1])
                     diam = float(dists.max())
                 if diam > self.cluster_max_diameter:
                     continue
             accepted_clusters.append(filtered)
 
-        if not accepted_clusters: 
-            self._publish_delete_marker()
-            return
+        if not accepted_clusters:
+            return False
 
         largest = max(accepted_clusters, key=lambda c: c.shape[0])
         centroid = np.mean(largest, axis=0)
@@ -356,24 +409,25 @@ class ObstacleTracker(Node):
             raw_x = float(centroid[0])
             raw_y = float(centroid[1])
             
-            # Initialize or reset filter for new tracking target
-            # (pose_callback resets tracking, so this is a fresh detection)
-            self.filtered_obstacle = {'x': raw_x, 'y': raw_y}
+            # Convert to map frame and store (tracked_obstacle is now in MAP frame)
+            ct = math.cos(pose['theta'])
+            st = math.sin(pose['theta'])
+            map_x = pose['x'] + ct * raw_x - st * raw_y
+            map_y = pose['y'] + st * raw_x + ct * raw_y
             
-            self.tracked_obstacle = {'x': self.filtered_obstacle['x'], 'y': self.filtered_obstacle['y']}
+            self.filtered_obstacle_map = {'x': map_x, 'y': map_y}
+            self.tracked_obstacle = {'x': map_x, 'y': map_y}  # Stored in MAP frame
             self.tracking = True
-            self.current_pose = pose
+            
             timestamp = self.get_clock().now().nanoseconds / 1e9
-            # Store pose with measurement for correct velocity estimation
+            # Store map-frame position in history (no pose needed)
             self.obstacle_position_history.append({
                 'x': self.tracked_obstacle['x'],
                 'y': self.tracked_obstacle['y'],
-                'timestamp': timestamp,
-                'pose': pose.copy()  # Store pose at measurement time
+                'timestamp': timestamp
             })
 
-        self.publish_obstacle(self.tracked_obstacle)
-        self.publish_marker(self.tracked_obstacle)
+        return True
 
     #
     # Pose Interpolation for Timestamp Synchronization
@@ -470,46 +524,23 @@ class ObstacleTracker(Node):
 
     def estimate_obstacle_velocity(self):
         """
-        Estimate obstacle velocity from position history (convert to map frame).
+        Estimate obstacle velocity from position history.
         
-        FIXED: Now uses the correct robot pose for each historical measurement
-        instead of using the current pose for all measurements. This prevents
-        stationary obstacles from appearing to move when the robot moves/rotates.
+        Since tracked_obstacle is now stored in MAP frame, we can directly
+        compute velocity from the history without coordinate transformations.
         """
         with self.lock:
             if len(self.obstacle_position_history) < 2:
                 return {'vx': 0.0, 'vy': 0.0}
             history = list(self.obstacle_position_history)
         
-        # Convert obstacle positions from robot frame to map frame
-        # using the CORRECT pose for each measurement timestamp
-        map_positions = []
-        for h in history:
-            # Use the stored pose from measurement time, or interpolate if not available
-            if 'pose' in h and h['pose'] is not None:
-                # Use the pose that was recorded with this measurement
-                pose_at_measurement = h['pose']
-            else:
-                # Fallback: interpolate pose at measurement timestamp
-                pose_at_measurement = self.interpolate_pose(h['timestamp'])
-                if pose_at_measurement is None:
-                    continue
-            
-            ct = math.cos(pose_at_measurement['theta'])
-            st = math.sin(pose_at_measurement['theta'])
-            mx = pose_at_measurement['x'] + ct * h['x'] - st * h['y']
-            my = pose_at_measurement['y'] + st * h['x'] + ct * h['y']
-            map_positions.append({'x': mx, 'y': my, 'timestamp': h['timestamp']})
-        
-        if len(map_positions) < 2:
-            return {'vx': 0.0, 'vy': 0.0}
-        
-        dt = map_positions[-1]['timestamp'] - map_positions[0]['timestamp']
+        # Positions are already in map frame - direct velocity computation
+        dt = history[-1]['timestamp'] - history[0]['timestamp']
         if dt < 1e-6:
             return {'vx': 0.0, 'vy': 0.0}
         
-        dx = map_positions[-1]['x'] - map_positions[0]['x']
-        dy = map_positions[-1]['y'] - map_positions[0]['y']
+        dx = history[-1]['x'] - history[0]['x']
+        dy = history[-1]['y'] - history[0]['y']
         
         return {'vx': dx / dt, 'vy': dy / dt}
 
@@ -536,22 +567,15 @@ class ObstacleTracker(Node):
     def predict_obstacle_position(self, time_ahead):
         """Predict obstacle position after time_ahead seconds (in map frame)."""
         with self.lock:
-            if self.tracked_obstacle is None or self.current_pose is None:
+            if self.tracked_obstacle is None:
                 return None
-            obs = self.tracked_obstacle.copy()
-            pose = self.current_pose.copy()
+            obs = self.tracked_obstacle.copy()  # Already in map frame
         
         vel = self.estimate_obstacle_velocity()
         
-        # Convert obstacle from robot frame to map frame
-        ct = math.cos(pose['theta'])
-        st = math.sin(pose['theta'])
-        obs_map_x = pose['x'] + ct * obs['x'] - st * obs['y']
-        obs_map_y = pose['y'] + st * obs['x'] + ct * obs['y']
-        
-        # Predict future position
-        predicted_x = obs_map_x + vel['vx'] * time_ahead
-        predicted_y = obs_map_y + vel['vy'] * time_ahead
+        # tracked_obstacle is already in map frame - no conversion needed
+        predicted_x = obs['x'] + vel['vx'] * time_ahead
+        predicted_y = obs['y'] + vel['vy'] * time_ahead
         
         return {
             'x': predicted_x,
@@ -667,14 +691,12 @@ class ObstacleTracker(Node):
                 # Clear visualization if not tracking
                 self.publish_collision_visualization(None, None, [], [], False, None)
                 return
-            obs = self.tracked_obstacle.copy()
+            obs = self.tracked_obstacle.copy()  # Already in map frame
             pose = self.current_pose.copy()
         
-        # Convert obstacle to map frame for distance check
-        ct = math.cos(pose['theta'])
-        st = math.sin(pose['theta'])
-        obs_map_x = pose['x'] + ct * obs['x'] - st * obs['y']
-        obs_map_y = pose['y'] + st * obs['x'] + ct * obs['y']
+        # tracked_obstacle is already in map frame - no conversion needed
+        obs_map_x = obs['x']
+        obs_map_y = obs['y']
         
         current_distance = math.hypot(obs_map_x - pose['x'], obs_map_y - pose['y'])
         
@@ -993,17 +1015,10 @@ class ObstacleTracker(Node):
     # Publishing (reusing message objects)
     #
     def publish_obstacle(self, obs: dict):
-        if self.current_pose is not None:
-            pose = self.current_pose
-            ct = math.cos(pose['theta'])
-            st = math.sin(pose['theta'])
-            mx = pose['x'] + ct * obs['x'] - st * obs['y']
-            my = pose['y'] + st * obs['x'] + ct * obs['y']
-            self._pose_msg.header.frame_id = 'map'
-            self._pose_msg.pose.position.x = float(mx)
-            self._pose_msg.pose.position.y = float(my)
-        else:
-            self.get_logger().warning('No robot pose available')
+        """Publish obstacle position. obs is in MAP frame."""
+        self._pose_msg.header.frame_id = 'map'
+        self._pose_msg.pose.position.x = float(obs['x'])
+        self._pose_msg.pose.position.y = float(obs['y'])
             
         self._pose_msg.header.stamp = self.get_clock().now().to_msg()
         self._pose_msg.pose.position.z = 0.0
@@ -1013,23 +1028,13 @@ class ObstacleTracker(Node):
         self._pose_msg.pose.orientation.w = 1.0
         self.obstacle_pub.publish(self._pose_msg)
 
-    def publish_marker(self, obs: dict, use_map:  bool = True):
+    def publish_marker(self, obs: dict):
+        """Publish obstacle marker. obs is in MAP frame."""
         m = self._marker_msg
-        if use_map and (self.current_pose is not None):
-            pose = self.current_pose
-            ct = math.cos(pose['theta'])
-            st = math.sin(pose['theta'])
-            world_x = pose['x'] + ct * obs['x'] - st * obs['y']
-            world_y = pose['y'] + st * obs['x'] + ct * obs['y']
-            m.header.frame_id = 'map'
-            m.pose.position.x = float(world_x)
-            m.pose.position.y = float(world_y)
-            m.pose.position.z = 0.0
-        else:
-            m.header.frame_id = 'base_link'
-            m.pose.position.x = float(obs['x'])
-            m.pose.position.y = float(obs['y'])
-            m.pose.position.z = 0.0
+        m.header.frame_id = 'map'
+        m.pose.position.x = float(obs['x'])
+        m.pose.position.y = float(obs['y'])
+        m.pose.position.z = 0.0
 
         m.scale.x = 0.2
         m.scale.y = 0.2
