@@ -13,7 +13,7 @@ from sensor_msgs.msg import LaserScan
 from visualization_msgs.msg import Marker
 from tf2_ros import TransformBroadcaster
 from rclpy.node import Node
-from std_msgs.msg import Int32
+from std_msgs.msg import Int32, Float32
 
 # QoS imports for transient-local map subscription
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy, HistoryPolicy
@@ -37,14 +37,14 @@ class ObstacleTracker(Node):
         self.obstacle_collision_radius = 0.25  # meters
         
         # Detection threshold - start prediction when obstacle is within this distance
-        self.detection_threshold = 1.0  # meters
+        self.detection_threshold = 1.2  # meters (increased from 1.0 for better reaction time)
         
         # Collision prediction time horizon (accounts for system latency)
         # Observed latency:  0.1m at 0.7m/s = ~0.143s
         self.collision_prediction_time = 0.3  # seconds
         
         # Number of intermediate steps to check along trajectory
-        self.prediction_steps = 3  # Check 3 intermediate positions + final position
+        self.prediction_steps = 5  # Check 5 intermediate positions (increased from 3)
         
         # History length for velocity estimation
         self.history_length = 5
@@ -54,9 +54,9 @@ class ObstacleTracker(Node):
         self.obstacle_filter_alpha = 0.4  # Smoothing factor (tune based on noise level)
         self.filtered_obstacle_map = None  # Stores filtered position in MAP frame (rotation-invariant)
         
-        # Rotation detection parameters - to prevent false obstacle movement during rotation
-        self.rotation_rate_threshold = 0.3  # rad/s - above this, robot is "rotating"
-        self.rotation_damping_alpha = 0.05  # Much lower alpha during rotation (heavy smoothing)
+        # Rotation detection parameters - use moderate filtering during rotation
+        self.rotation_rate_threshold = 0.5  # rad/s - increased from 0.3 to only trigger on significant rotation
+        self.rotation_filter_alpha = 0.25  # Moderate smoothing during rotation (was 0.05 which was too heavy)
         
         # Velocity histories
         self.robot_pose_history = deque(maxlen=self.history_length)
@@ -73,7 +73,7 @@ class ObstacleTracker(Node):
         self.cluster_min_distance = 0.1
         self.cluster_max_diameter = 0.3
         self.close_threshold = 0.5
-        self.scan_tracking_stop_distance = 0.8
+        self.scan_tracking_stop_distance = 1.2  # Increased from 0.8m to maintain tracking lock
         self.min_point_distance = 0.2
 
         # Subscriptions / publishers
@@ -88,6 +88,7 @@ class ObstacleTracker(Node):
         self.create_subscription(Vector3, '/robot_pose_raw', self.pose_callback, 10)
         self.obstacle_pub = self.create_publisher(PoseStamped, '/obstacle_relative', 10)
         self.close_pub = self.create_publisher(Int32, '/emergency_break', 10)
+        self.travel_distance_pub = self.create_publisher(Float32, '/collision_travel_distance', 10)
         self.marker_pub = self.create_publisher(Marker, '/obstacle_candidate_marker', 10)
         
         # New publishers for collision visualization
@@ -141,7 +142,7 @@ class ObstacleTracker(Node):
             f'  Prediction steps: {self.prediction_steps}\n'
             f'  Obstacle filter alpha: {self.obstacle_filter_alpha}\n'
             f'  Rotation rate threshold: {self.rotation_rate_threshold} rad/s\n'
-            f'  Rotation damping alpha: {self.rotation_damping_alpha}'
+            f'  Rotation filter alpha: {self.rotation_filter_alpha} (moderate filtering, not heavy damping)'
         )
 
     #
@@ -280,7 +281,11 @@ class ObstacleTracker(Node):
         best_dist = dists[best_idx]
 
         if best_dist > self.scan_tracking_stop_distance:
-            # Lost tracking - try re-detection if we have map
+            # Lost tracking - obstacle moved too far
+            self.get_logger().info(
+                f'❌ Lost tracking: obstacle moved {best_dist:.3f}m (threshold={self.scan_tracking_stop_distance}m)'
+            )
+            # Try re-detection if we have map
             if has_map:
                 with self.lock:
                     self.tracking = False
@@ -330,17 +335,20 @@ class ObstacleTracker(Node):
                     # Skip to publishing - don't reset tracking
                 else:
                     # Not rotating, genuinely invalid - reset tracking
+                    self.get_logger().info(
+                        f'❌ Lost tracking: invalid position ({raw_map_x:.2f}, {raw_map_y:.2f}) - outside map or in occupied space'
+                    )
                     self.tracking = False
                     self.tracked_obstacle = None
                     self.filtered_obstacle_map = None
                     obs = None
             else:
                 # Position is valid - apply low-pass filter in map frame (rotation-invariant)
-                # Use much lower alpha during rotation to prevent false drift
+                # Use moderate filtering during rotation (not heavy damping)
                 if is_rotating:
-                    alpha = self.rotation_damping_alpha
+                    alpha = self.rotation_filter_alpha  # 0.25 - balances noise reduction with tracking accuracy
                 else:
-                    alpha = self.obstacle_filter_alpha
+                    alpha = self.obstacle_filter_alpha  # 0.4 - normal filtering
                     
                 if self.filtered_obstacle_map is None:
                     self.filtered_obstacle_map = {'x': raw_map_x, 'y': raw_map_y}
@@ -507,6 +515,24 @@ class ObstacleTracker(Node):
                     'y': self.tracked_obstacle['y'],
                     'timestamp': timestamp
                 })
+            
+            # Log when new obstacle tracking starts (but reduce spam for same obstacle)
+            distance_to_robot = math.hypot(map_x - pose['x'], map_y - pose['y'])
+            
+            # Only log if this is actually a new obstacle (not a restart of same one)
+            should_log = True
+            if hasattr(self, '_last_tracked_pos'):
+                last_x, last_y = self._last_tracked_pos
+                pos_change = math.hypot(map_x - last_x, map_y - last_y)
+                if pos_change < 0.5:  # Same obstacle (moved less than 0.5m)
+                    should_log = False
+            
+            if should_log:
+                self.get_logger().info(
+                    f'🎯 Started tracking obstacle: pos=({map_x:.2f}, {map_y:.2f}), distance={distance_to_robot:.3f}m'
+                )
+                self._last_tracked_pos = (map_x, map_y)
+            
             return True
         
         # No valid obstacle found
@@ -818,17 +844,54 @@ class ObstacleTracker(Node):
         flag_msg.data = 1 if collision_detected else 0
         self.close_pub.publish(flag_msg)
         
+        # Publish travel distance to collision
+        if collision_detected:
+            robot_vel = self.estimate_robot_velocity()
+            robot_speed = math.hypot(robot_vel['vx'], robot_vel['vy'])
+            travel_distance = robot_speed * collision_time if collision_time else 0.0
+            distance_msg = Float32()
+            distance_msg.data = float(travel_distance)
+            self.travel_distance_pub.publish(distance_msg)
+        
+        # Enhanced logging for debugging - only log when robot is actually moving
+        if collision_detected:
+            # Get robot velocity for logging
+            robot_vel = self.estimate_robot_velocity()
+            robot_speed = math.hypot(robot_vel['vx'], robot_vel['vy'])
+            
+            # Only log if robot is moving (speed > 0.02 m/s)
+            # This prevents spam when robot is already stopped
+            if robot_speed > 0.02:
+                # Calculate predicted collision point
+                if robot_trajectory and len(robot_trajectory) > 0:
+                    collision_robot_pos = robot_trajectory[-1]  # Position at collision time
+                    predicted_distance = math.hypot(
+                        collision_robot_pos['x'] - obs_map_x,
+                        collision_robot_pos['y'] - obs_map_y
+                    )
+                else:
+                    predicted_distance = current_distance
+                
+                # Calculate distance robot will travel before collision
+                travel_distance = robot_speed * collision_time if collision_time else 0.0
+                
+                self.get_logger().warn(
+                    f'🚨 EMERGENCY STOP TRIGGERED!\n'
+                    f'  Time to collision: {collision_time*1000:.0f}ms\n'
+                    f'  Current distance: {current_distance:.3f}m\n'
+                    f'  Predicted collision distance: {predicted_distance:.3f}m\n'
+                    f'  Travel distance: {travel_distance:.3f}m\n'
+                    f'  Robot: pos=({pose["x"]:.2f}, {pose["y"]:.2f}), theta={pose["theta"]:.2f}rad, speed={robot_speed:.2f}m/s\n'
+                    f'  Robot velocity: vx={robot_vel["vx"]:.2f}, vy={robot_vel["vy"]:.2f}, vtheta={robot_vel["vtheta"]:.2f}rad/s\n'
+                    f'  Obstacle: pos=({obs_map_x:.2f}, {obs_map_y:.2f})'
+                )
+        
         # Publish visualization
         self.publish_collision_visualization(
             pose, {'x': obs_map_x, 'y': obs_map_y},
             robot_trajectory, obstacle_trajectory,
             collision_detected, collision_time
         )
-        
-        if collision_detected:
-            self.get_logger().warn(
-                f'Collision predicted in {collision_time:.3f}s!  Emergency brake activated.'
-            )
 
     def publish_collision_visualization(self, current_robot, current_obstacle,
                                        robot_trajectory, obstacle_trajectory,
@@ -1209,8 +1272,6 @@ class ObstacleTracker(Node):
         except Exception:
             pass
         super().destroy_node()
-
-
 def main(args=None):
     rclpy.init(args=args)
     node = ObstacleTracker()
