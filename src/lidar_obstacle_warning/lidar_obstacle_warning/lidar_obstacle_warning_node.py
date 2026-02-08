@@ -41,7 +41,7 @@ class ObstacleTracker(Node):
         
         # Collision prediction time horizon (accounts for system latency)
         # Observed latency:  0.1m at 0.7m/s = ~0.143s
-        self.collision_prediction_time = 0.143  # seconds
+        self.collision_prediction_time = 0.3  # seconds
         
         # Number of intermediate steps to check along trajectory
         self.prediction_steps = 3  # Check 3 intermediate positions + final position
@@ -53,6 +53,10 @@ class ObstacleTracker(Node):
         # alpha = 1.0 means no filtering, alpha = 0.1 means heavy smoothing
         self.obstacle_filter_alpha = 0.4  # Smoothing factor (tune based on noise level)
         self.filtered_obstacle_map = None  # Stores filtered position in MAP frame (rotation-invariant)
+        
+        # Rotation detection parameters - to prevent false obstacle movement during rotation
+        self.rotation_rate_threshold = 0.3  # rad/s - above this, robot is "rotating"
+        self.rotation_damping_alpha = 0.05  # Much lower alpha during rotation (heavy smoothing)
         
         # Velocity histories
         self.robot_pose_history = deque(maxlen=self.history_length)
@@ -135,7 +139,9 @@ class ObstacleTracker(Node):
             f'  Detection threshold: {self.detection_threshold}m\n'
             f'  Prediction time:  {self.collision_prediction_time}s\n'
             f'  Prediction steps: {self.prediction_steps}\n'
-            f'  Obstacle filter alpha: {self.obstacle_filter_alpha}'
+            f'  Obstacle filter alpha: {self.obstacle_filter_alpha}\n'
+            f'  Rotation rate threshold: {self.rotation_rate_threshold} rad/s\n'
+            f'  Rotation damping alpha: {self.rotation_damping_alpha}'
         )
 
     #
@@ -220,12 +226,23 @@ class ObstacleTracker(Node):
         if pts.size == 0:
             return
 
-        accepted_clusters, _ = self.cluster_scan_ordered(
+        all_clusters, _ = self.cluster_scan_ordered(
             pts,
             min_points=self.cluster_min_points,
             max_gap=self.cluster_min_distance,
             max_diameter=self.cluster_max_diameter,
         )
+
+        # Filter clusters to only keep those in free space (not in black zones)
+        accepted_clusters = []
+        if has_map:
+            for c in all_clusters:
+                filtered = self.filter_free_space(c, interpolated_pose)
+                # Only accept cluster if ALL points pass the filter (are in free space)
+                if filtered.shape[0] == c.shape[0] and filtered.shape[0] >= self.cluster_min_points:
+                    accepted_clusters.append(c)
+        else:
+            accepted_clusters = all_clusters
 
         if not accepted_clusters:
             # No clusters found - try re-detection if we have map
@@ -287,33 +304,89 @@ class ObstacleTracker(Node):
 
         # Update tracked obstacle with filtering in MAP FRAME
         # This ensures robot rotation doesn't cause position errors
+        
+        # Detect if robot is currently rotating - if so, heavily dampen updates
+        # to prevent false obstacle movement due to pose interpolation errors
+        robot_vel = self.estimate_robot_velocity()
+        is_rotating = abs(robot_vel['vtheta']) > self.rotation_rate_threshold
+        
+        raw_x = float(best_centroid[0])
+        raw_y = float(best_centroid[1])
+        
+        # Convert raw measurement from robot frame to map frame
+        raw_map_x = interpolated_pose['x'] + ct * raw_x - st * raw_y
+        raw_map_y = interpolated_pose['y'] + st * raw_x + ct * raw_y
+        
+        # Validate that the new position is in a valid map area
+        position_valid = self.is_valid_map_position(raw_map_x, raw_map_y)
+        
         with self.lock:
-            raw_x = float(best_centroid[0])
-            raw_y = float(best_centroid[1])
-            
-            # Convert raw measurement from robot frame to map frame
-            raw_map_x = interpolated_pose['x'] + ct * raw_x - st * raw_y
-            raw_map_y = interpolated_pose['y'] + st * raw_x + ct * raw_y
-            
-            # Apply low-pass filter in map frame (rotation-invariant)
-            alpha = self.obstacle_filter_alpha
-            if self.filtered_obstacle_map is None:
-                self.filtered_obstacle_map = {'x': raw_map_x, 'y': raw_map_y}
+            if not position_valid:
+                # Position is in invalid area (outside map or occupied)
+                # During rotation this is expected - just skip this update instead of resetting
+                if is_rotating and self.tracked_obstacle is not None:
+                    # Keep existing position, don't update with invalid measurement
+                    obs = self.tracked_obstacle.copy()
+                    # Skip to publishing - don't reset tracking
+                else:
+                    # Not rotating, genuinely invalid - reset tracking
+                    self.tracking = False
+                    self.tracked_obstacle = None
+                    self.filtered_obstacle_map = None
+                    obs = None
             else:
-                self.filtered_obstacle_map['x'] = alpha * raw_map_x + (1 - alpha) * self.filtered_obstacle_map['x']
-                self.filtered_obstacle_map['y'] = alpha * raw_map_y + (1 - alpha) * self.filtered_obstacle_map['y']
-            
-            # Store tracked_obstacle in MAP FRAME
-            self.tracked_obstacle = {'x': self.filtered_obstacle_map['x'], 'y': self.filtered_obstacle_map['y']}
-            
-            timestamp = self.get_clock().now().nanoseconds / 1e9
-            # Store map-frame position in history (no pose needed for conversion)
-            self.obstacle_position_history.append({
-                'x': self.tracked_obstacle['x'],
-                'y': self.tracked_obstacle['y'],
-                'timestamp': timestamp
-            })
-            obs = self.tracked_obstacle.copy()
+                # Position is valid - apply low-pass filter in map frame (rotation-invariant)
+                # Use much lower alpha during rotation to prevent false drift
+                if is_rotating:
+                    alpha = self.rotation_damping_alpha
+                else:
+                    alpha = self.obstacle_filter_alpha
+                    
+                if self.filtered_obstacle_map is None:
+                    self.filtered_obstacle_map = {'x': raw_map_x, 'y': raw_map_y}
+                else:
+                    self.filtered_obstacle_map['x'] = alpha * raw_map_x + (1 - alpha) * self.filtered_obstacle_map['x']
+                    self.filtered_obstacle_map['y'] = alpha * raw_map_y + (1 - alpha) * self.filtered_obstacle_map['y']
+                
+                # Validate filtered position is still valid
+                if not self.is_valid_map_position(self.filtered_obstacle_map['x'], self.filtered_obstacle_map['y']):
+                    if is_rotating:
+                        # During rotation, revert to pre-filter position
+                        self.filtered_obstacle_map = {'x': self.tracked_obstacle['x'], 'y': self.tracked_obstacle['y']}
+                        obs = self.tracked_obstacle.copy()
+                    else:
+                        self.tracking = False
+                        self.tracked_obstacle = None
+                        self.filtered_obstacle_map = None
+                        obs = None
+                else:
+                    # Store tracked_obstacle in MAP FRAME
+                    self.tracked_obstacle = {'x': self.filtered_obstacle_map['x'], 'y': self.filtered_obstacle_map['y']}
+                    
+                    timestamp = self.get_clock().now().nanoseconds / 1e9
+                    # Store map-frame position in history (no pose needed for conversion)
+                    self.obstacle_position_history.append({
+                        'x': self.tracked_obstacle['x'],
+                        'y': self.tracked_obstacle['y'],
+                        'timestamp': timestamp
+                    })
+                    obs = self.tracked_obstacle.copy()
+        
+        # If tracking was reset, try re-detection
+        with self.lock:
+            still_tracking = self.tracking
+        
+        if not still_tracking:
+            if has_map:
+                if self._detect_new_obstacle(scan, interpolated_pose):
+                    with self.lock:
+                        obs = self.tracked_obstacle.copy() if self.tracked_obstacle else None
+                    if obs:
+                        self.publish_obstacle(obs)
+                        self.publish_marker(obs)
+                else:
+                    self._publish_delete_marker()
+            return
 
         self.publish_obstacle(obs)
         self.publish_marker(obs)
@@ -402,32 +475,42 @@ class ObstacleTracker(Node):
         if not accepted_clusters:
             return False
 
-        largest = max(accepted_clusters, key=lambda c: c.shape[0])
-        centroid = np.mean(largest, axis=0)
-
-        with self.lock:
+        # Sort by size (largest first), but validate each candidate's map position
+        sorted_clusters = sorted(accepted_clusters, key=lambda c: c.shape[0], reverse=True)
+        
+        ct = math.cos(pose['theta'])
+        st = math.sin(pose['theta'])
+        
+        for cluster in sorted_clusters:
+            centroid = np.mean(cluster, axis=0)
             raw_x = float(centroid[0])
             raw_y = float(centroid[1])
             
-            # Convert to map frame and store (tracked_obstacle is now in MAP frame)
-            ct = math.cos(pose['theta'])
-            st = math.sin(pose['theta'])
+            # Convert to map frame
             map_x = pose['x'] + ct * raw_x - st * raw_y
             map_y = pose['y'] + st * raw_x + ct * raw_y
             
-            self.filtered_obstacle_map = {'x': map_x, 'y': map_y}
-            self.tracked_obstacle = {'x': map_x, 'y': map_y}  # Stored in MAP frame
-            self.tracking = True
+            # Validate centroid is in valid map area
+            if not self.is_valid_map_position(map_x, map_y):
+                continue  # Skip this cluster, try next largest
             
-            timestamp = self.get_clock().now().nanoseconds / 1e9
-            # Store map-frame position in history (no pose needed)
-            self.obstacle_position_history.append({
-                'x': self.tracked_obstacle['x'],
-                'y': self.tracked_obstacle['y'],
-                'timestamp': timestamp
-            })
-
-        return True
+            # Found a valid obstacle
+            with self.lock:
+                self.filtered_obstacle_map = {'x': map_x, 'y': map_y}
+                self.tracked_obstacle = {'x': map_x, 'y': map_y}  # Stored in MAP frame
+                self.tracking = True
+                
+                timestamp = self.get_clock().now().nanoseconds / 1e9
+                # Store map-frame position in history (no pose needed)
+                self.obstacle_position_history.append({
+                    'x': self.tracked_obstacle['x'],
+                    'y': self.tracked_obstacle['y'],
+                    'timestamp': timestamp
+                })
+            return True
+        
+        # No valid obstacle found
+        return False
 
     #
     # Pose Interpolation for Timestamp Synchronization
@@ -948,7 +1031,8 @@ class ObstacleTracker(Node):
         valid_cy = cy[in_bounds]
         occ_vals = self.map_np[valid_cy, valid_cx]
         free_mask = in_bounds.copy()
-        free_mask[in_bounds] = np.isin(occ_vals, [0, -1])
+        # Keep points in free space (0) and unknown (-1), filter out occupied (>0, typically 100)
+        free_mask[in_bounds] = (occ_vals == 0) | (occ_vals == -1)
 
         if not np.any(free_mask):
             return np.empty((0, 2), dtype=np.float32)
@@ -960,6 +1044,41 @@ class ObstacleTracker(Node):
             filtered_points = filtered_points[order]
 
         return filtered_points
+
+    def is_valid_map_position(self, map_x: float, map_y: float) -> bool:
+        """
+        Check if a position in MAP frame is in a valid area.
+        Returns True if position is inside map bounds AND in free/unknown space.
+        Returns False if outside map bounds OR in occupied space.
+        """
+        if self.map_np is None or not self.map_info:
+            return True  # No map available, assume valid
+        
+        res = self.map_info['res']
+        width = self.map_info['width']
+        height = self.map_info['height']
+        ox = self.map_info['ox']
+        oy = self.map_info['oy']
+        yaw = self.map_info.get('yaw', 0.0)
+        
+        # Transform from map frame to occupancy grid indices
+        dx = map_x - ox
+        dy = map_y - oy
+        cos_y = math.cos(yaw)
+        sin_y = math.sin(yaw)
+        grid_x = cos_y * dx + sin_y * dy
+        grid_y = -sin_y * dx + cos_y * dy
+        
+        cx = int(math.floor(grid_x / res))
+        cy = int(math.floor(grid_y / res))
+        
+        # Check bounds - positions outside map are INVALID
+        if cx < 0 or cx >= width or cy < 0 or cy >= height:
+            return False
+        
+        # Check occupancy - occupied (>0, typically 100) is INVALID
+        occ_val = self.map_np[cy, cx]
+        return occ_val == 0 or occ_val == -1
 
     def cluster_scan_ordered(
         self, points: np.ndarray, min_points: int = 3, max_gap: float = 0.1, max_diameter: Optional[float] = None
