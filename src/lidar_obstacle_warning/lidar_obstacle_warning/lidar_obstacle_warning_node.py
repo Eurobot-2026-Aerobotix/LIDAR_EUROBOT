@@ -13,7 +13,8 @@ from sensor_msgs.msg import LaserScan
 from visualization_msgs.msg import Marker
 from tf2_ros import TransformBroadcaster
 from rclpy.node import Node
-from std_msgs.msg import Int32, Float32
+from std_msgs.msg import Int32
+from lidar_obstacle_warning_msgs.msg import EmergencyStop
 
 # QoS imports for transient-local map subscription
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy, HistoryPolicy
@@ -88,7 +89,7 @@ class ObstacleTracker(Node):
         self.create_subscription(Vector3, '/robot_pose_raw', self.pose_callback, 10)
         self.obstacle_pub = self.create_publisher(PoseStamped, '/obstacle_relative', 10)
         self.close_pub = self.create_publisher(Int32, '/emergency_break', 10)
-        self.travel_distance_pub = self.create_publisher(Float32, '/collision_travel_distance', 10)
+        self.emergency_stop_pub = self.create_publisher(EmergencyStop, '/emergency_stop', 10)
         self.marker_pub = self.create_publisher(Marker, '/obstacle_candidate_marker', 10)
         
         # New publishers for collision visualization
@@ -844,14 +845,17 @@ class ObstacleTracker(Node):
         flag_msg.data = 1 if collision_detected else 0
         self.close_pub.publish(flag_msg)
         
-        # Publish travel distance to collision
+        # Publish custom EmergencyStop message
+        emergency_msg = EmergencyStop()
+        emergency_msg.emergency_triggered = 1 if collision_detected else 0
         if collision_detected:
             robot_vel = self.estimate_robot_velocity()
             robot_speed = math.hypot(robot_vel['vx'], robot_vel['vy'])
             travel_distance = robot_speed * collision_time if collision_time else 0.0
-            distance_msg = Float32()
-            distance_msg.data = float(travel_distance)
-            self.travel_distance_pub.publish(distance_msg)
+            emergency_msg.distance = float(travel_distance)
+        else:
+            emergency_msg.distance = 0.0
+        self.emergency_stop_pub.publish(emergency_msg)
         
         # Enhanced logging for debugging - only log when robot is actually moving
         if collision_detected:

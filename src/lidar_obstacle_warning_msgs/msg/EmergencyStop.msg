@@ -1,0 +1,2 @@
+int32 emergency_triggered
+float32 distance
