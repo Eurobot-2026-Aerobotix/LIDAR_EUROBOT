@@ -62,8 +62,6 @@ class ObstacleTracker(Node):
         self.robot_pose_history = deque(maxlen=self.history_length)
         self.obstacle_position_history = deque(maxlen=self.history_length)
         
-        # Timer for periodic collision checking
-        self.collision_check_timer = self.create_timer(0.1, self.collision_check_callback)  # 10 Hz
         # ============================================
 
         # Original parameters
@@ -217,6 +215,7 @@ class ObstacleTracker(Node):
                     if obs:
                         self.publish_obstacle(obs)
                         self.publish_marker(obs)
+                        self.collision_check_callback()
                 else:
                     self._publish_delete_marker()
             return
@@ -257,6 +256,7 @@ class ObstacleTracker(Node):
                     if obs:
                         self.publish_obstacle(obs)
                         self.publish_marker(obs)
+                        self.collision_check_callback()
                 else:
                     self._publish_delete_marker()
             return
@@ -292,6 +292,7 @@ class ObstacleTracker(Node):
                     if obs:
                         self.publish_obstacle(obs)
                         self.publish_marker(obs)
+                        self.collision_check_callback()
                 else:
                     self._publish_delete_marker()
             else:
@@ -384,12 +385,14 @@ class ObstacleTracker(Node):
                     if obs:
                         self.publish_obstacle(obs)
                         self.publish_marker(obs)
+                        self.collision_check_callback()
                 else:
                     self._publish_delete_marker()
             return
 
         self.publish_obstacle(obs)
         self.publish_marker(obs)
+        self.collision_check_callback()
 
     def map_callback(self, msg: OccupancyGrid):
         self.latest_map_msg = msg
@@ -499,6 +502,9 @@ class ObstacleTracker(Node):
                 self.filtered_obstacle_map = {'x': map_x, 'y': map_y}
                 self.tracked_obstacle = {'x': map_x, 'y': map_y}  # Stored in MAP frame
                 self.tracking = True
+                
+                # Clear old history and start fresh for the new obstacle
+                self.obstacle_position_history.clear()
                 
                 timestamp = self.get_clock().now().nanoseconds / 1e9
                 # Store map-frame position in history (no pose needed)
@@ -773,6 +779,10 @@ class ObstacleTracker(Node):
             if not self.tracking or self.tracked_obstacle is None or self.current_pose is None:
                 # Clear visualization if not tracking
                 self.publish_collision_visualization(None, None, [], [], False, None)
+                # Clear emergency brake when not tracking
+                flag_msg = Int32()
+                flag_msg.data = 0
+                self.close_pub.publish(flag_msg)
                 return
             obs = self.tracked_obstacle.copy()  # Already in map frame
             pose = self.current_pose.copy()
@@ -786,6 +796,10 @@ class ObstacleTracker(Node):
         # Only predict if obstacle is within detection threshold
         if current_distance > self.detection_threshold:
             self.publish_collision_visualization(None, None, [], [], False, None)
+            # Clear emergency brake when obstacle is out of range
+            flag_msg = Int32()
+            flag_msg.data = 0
+            self.close_pub.publish(flag_msg)
             return
         
         # Check collision at intermediate steps along the trajectory
