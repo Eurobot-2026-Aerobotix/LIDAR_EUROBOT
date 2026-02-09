@@ -68,13 +68,13 @@ class ObstacleTracker(Node):
         # ============================================
 
         # Original parameters
-        self.scan_skip = 2
+        self.scan_skip = 1
         self.range_downsample = 1
         self.cluster_min_points = 5
         self.cluster_min_distance = 0.1
         self.cluster_max_diameter = 0.3
         self.close_threshold = 0.5
-        self.scan_tracking_stop_distance = 1.2  # Increased from 0.8m to maintain tracking lock
+        self.scan_tracking_stop_distance = 10  # Increased from 0.8m to maintain tracking lock
         self.min_point_distance = 0.2
 
         # Subscriptions / publishers
@@ -219,6 +219,7 @@ class ObstacleTracker(Node):
                     if obs:
                         self.publish_obstacle(obs)
                         self.publish_marker(obs)
+                        self.collision_check_callback()
                 else:
                     self._publish_delete_marker()
             return
@@ -259,6 +260,7 @@ class ObstacleTracker(Node):
                     if obs:
                         self.publish_obstacle(obs)
                         self.publish_marker(obs)
+                        self.collision_check_callback()
                 else:
                     self._publish_delete_marker()
             return
@@ -282,11 +284,7 @@ class ObstacleTracker(Node):
         best_dist = dists[best_idx]
 
         if best_dist > self.scan_tracking_stop_distance:
-            # Lost tracking - obstacle moved too far
-            self.get_logger().info(
-                f'❌ Lost tracking: obstacle moved {best_dist:.3f}m (threshold={self.scan_tracking_stop_distance}m)'
-            )
-            # Try re-detection if we have map
+            # Lost tracking - try re-detection if we have map
             if has_map:
                 with self.lock:
                     self.tracking = False
@@ -298,6 +296,7 @@ class ObstacleTracker(Node):
                     if obs:
                         self.publish_obstacle(obs)
                         self.publish_marker(obs)
+                        self.collision_check_callback()
                 else:
                     self._publish_delete_marker()
             else:
@@ -336,20 +335,17 @@ class ObstacleTracker(Node):
                     # Skip to publishing - don't reset tracking
                 else:
                     # Not rotating, genuinely invalid - reset tracking
-                    self.get_logger().info(
-                        f'❌ Lost tracking: invalid position ({raw_map_x:.2f}, {raw_map_y:.2f}) - outside map or in occupied space'
-                    )
                     self.tracking = False
                     self.tracked_obstacle = None
                     self.filtered_obstacle_map = None
                     obs = None
             else:
                 # Position is valid - apply low-pass filter in map frame (rotation-invariant)
-                # Use moderate filtering during rotation (not heavy damping)
+                # Use much lower alpha during rotation to prevent false drift
                 if is_rotating:
-                    alpha = self.rotation_filter_alpha  # 0.25 - balances noise reduction with tracking accuracy
+                    alpha = self.rotation_damping_alpha
                 else:
-                    alpha = self.obstacle_filter_alpha  # 0.4 - normal filtering
+                    alpha = self.obstacle_filter_alpha
                     
                 if self.filtered_obstacle_map is None:
                     self.filtered_obstacle_map = {'x': raw_map_x, 'y': raw_map_y}
@@ -393,12 +389,14 @@ class ObstacleTracker(Node):
                     if obs:
                         self.publish_obstacle(obs)
                         self.publish_marker(obs)
+                        self.collision_check_callback()
                 else:
                     self._publish_delete_marker()
             return
 
         self.publish_obstacle(obs)
         self.publish_marker(obs)
+        self.collision_check_callback()
 
     def map_callback(self, msg: OccupancyGrid):
         self.latest_map_msg = msg
@@ -509,6 +507,9 @@ class ObstacleTracker(Node):
                 self.tracked_obstacle = {'x': map_x, 'y': map_y}  # Stored in MAP frame
                 self.tracking = True
                 
+                # Clear old history and start fresh for the new obstacle
+                self.obstacle_position_history.clear()
+                
                 timestamp = self.get_clock().now().nanoseconds / 1e9
                 # Store map-frame position in history (no pose needed)
                 self.obstacle_position_history.append({
@@ -516,24 +517,6 @@ class ObstacleTracker(Node):
                     'y': self.tracked_obstacle['y'],
                     'timestamp': timestamp
                 })
-            
-            # Log when new obstacle tracking starts (but reduce spam for same obstacle)
-            distance_to_robot = math.hypot(map_x - pose['x'], map_y - pose['y'])
-            
-            # Only log if this is actually a new obstacle (not a restart of same one)
-            should_log = True
-            if hasattr(self, '_last_tracked_pos'):
-                last_x, last_y = self._last_tracked_pos
-                pos_change = math.hypot(map_x - last_x, map_y - last_y)
-                if pos_change < 0.5:  # Same obstacle (moved less than 0.5m)
-                    should_log = False
-            
-            if should_log:
-                self.get_logger().info(
-                    f'🎯 Started tracking obstacle: pos=({map_x:.2f}, {map_y:.2f}), distance={distance_to_robot:.3f}m'
-                )
-                self._last_tracked_pos = (map_x, map_y)
-            
             return True
         
         # No valid obstacle found
@@ -800,6 +783,10 @@ class ObstacleTracker(Node):
             if not self.tracking or self.tracked_obstacle is None or self.current_pose is None:
                 # Clear visualization if not tracking
                 self.publish_collision_visualization(None, None, [], [], False, None)
+                # Clear emergency brake when not tracking
+                flag_msg = Int32()
+                flag_msg.data = 0
+                self.close_pub.publish(flag_msg)
                 return
             obs = self.tracked_obstacle.copy()  # Already in map frame
             pose = self.current_pose.copy()
@@ -813,6 +800,10 @@ class ObstacleTracker(Node):
         # Only predict if obstacle is within detection threshold
         if current_distance > self.detection_threshold:
             self.publish_collision_visualization(None, None, [], [], False, None)
+            # Clear emergency brake when obstacle is out of range
+            flag_msg = Int32()
+            flag_msg.data = 0
+            self.close_pub.publish(flag_msg)
             return
         
         # Check collision at intermediate steps along the trajectory
@@ -845,6 +836,12 @@ class ObstacleTracker(Node):
         flag_msg.data = 1 if collision_detected else 0
         self.close_pub.publish(flag_msg)
         
+        # Publish visualization
+        self.publish_collision_visualization(
+            pose, {'x': obs_map_x, 'y': obs_map_y},
+            robot_trajectory, obstacle_trajectory,
+            collision_detected, collision_time
+        )
         # Publish custom EmergencyStop message
         emergency_msg = EmergencyStop()
         emergency_msg.emergency_triggered = 1 if collision_detected else 0
@@ -861,15 +858,13 @@ class ObstacleTracker(Node):
                 )
         else:
             emergency_msg.distance = 0.0
-        
-        self.emergency_stop_pub.publish(emergency_msg)
-            
         # Publish visualization
         self.publish_collision_visualization(
             pose, {'x': obs_map_x, 'y': obs_map_y},
             robot_trajectory, obstacle_trajectory,
             collision_detected, collision_time
         )
+        self.emergency_stop_pub.publish(emergency_msg)
 
     def publish_collision_visualization(self, current_robot, current_obstacle,
                                        robot_trajectory, obstacle_trajectory,
@@ -1250,6 +1245,8 @@ class ObstacleTracker(Node):
         except Exception:
             pass
         super().destroy_node()
+
+
 def main(args=None):
     rclpy.init(args=args)
     node = ObstacleTracker()
