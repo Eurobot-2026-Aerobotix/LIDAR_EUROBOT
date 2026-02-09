@@ -35,14 +35,14 @@ class ObstacleTracker(Node):
         self.robot_width = 0.3   # meters
         
         # Obstacle collision geometry (circle)
-        self.obstacle_collision_radius = 0.25  # meters
+        self.obstacle_collision_radius = 0.35  # meters
         
         # Detection threshold - start prediction when obstacle is within this distance
-        self.detection_threshold = 1.2  # meters (increased from 1.0 for better reaction time)
+        self.detection_threshold = 10  # meters (increased from 1.0 for better reaction time)
         
         # Collision prediction time horizon (accounts for system latency)
         # Observed latency:  0.1m at 0.7m/s = ~0.143s
-        self.collision_prediction_time = 0.3  # seconds
+        self.collision_prediction_time = 1  # seconds
         
         # Number of intermediate steps to check along trajectory
         self.prediction_steps = 5  # Check 5 intermediate positions (increased from 3)
@@ -64,7 +64,7 @@ class ObstacleTracker(Node):
         self.obstacle_position_history = deque(maxlen=self.history_length)
         
         # Timer for periodic collision checking
-        self.collision_check_timer = self.create_timer(0.1, self.collision_check_callback)  # 10 Hz
+        self.collision_check_timer = self.create_timer(0.01, self.collision_check_callback)  # 10 Hz
         # ============================================
 
         # Original parameters
@@ -853,43 +853,17 @@ class ObstacleTracker(Node):
             robot_speed = math.hypot(robot_vel['vx'], robot_vel['vy'])
             travel_distance = robot_speed * collision_time if collision_time else 0.0
             emergency_msg.distance = float(travel_distance)
+            self.get_logger().warn(
+                    f'🚨 EMERGENCY STOP TRIGGERED!\n'
+                    f'  Travel distance: {emergency_msg.distance:.3f}m\n'
+                    f'  Obstacle: pos=({obs_map_x:.2f}, {obs_map_y:.2f})'
+                    f'My robot : x: {pose["x"]:.2f}, y: {pose["y"]:.2f}°\n'
+                )
         else:
             emergency_msg.distance = 0.0
+        
         self.emergency_stop_pub.publish(emergency_msg)
-        
-        # Enhanced logging for debugging - only log when robot is actually moving
-        if collision_detected:
-            # Get robot velocity for logging
-            robot_vel = self.estimate_robot_velocity()
-            robot_speed = math.hypot(robot_vel['vx'], robot_vel['vy'])
             
-            # Only log if robot is moving (speed > 0.02 m/s)
-            # This prevents spam when robot is already stopped
-            if robot_speed > 0.02:
-                # Calculate predicted collision point
-                if robot_trajectory and len(robot_trajectory) > 0:
-                    collision_robot_pos = robot_trajectory[-1]  # Position at collision time
-                    predicted_distance = math.hypot(
-                        collision_robot_pos['x'] - obs_map_x,
-                        collision_robot_pos['y'] - obs_map_y
-                    )
-                else:
-                    predicted_distance = current_distance
-                
-                # Calculate distance robot will travel before collision
-                travel_distance = robot_speed * collision_time if collision_time else 0.0
-                
-                self.get_logger().warn(
-                    f'🚨 EMERGENCY STOP TRIGGERED!\n'
-                    f'  Time to collision: {collision_time*1000:.0f}ms\n'
-                    f'  Current distance: {current_distance:.3f}m\n'
-                    f'  Predicted collision distance: {predicted_distance:.3f}m\n'
-                    f'  Travel distance: {travel_distance:.3f}m\n'
-                    f'  Robot: pos=({pose["x"]:.2f}, {pose["y"]:.2f}), theta={pose["theta"]:.2f}rad, speed={robot_speed:.2f}m/s\n'
-                    f'  Robot velocity: vx={robot_vel["vx"]:.2f}, vy={robot_vel["vy"]:.2f}, vtheta={robot_vel["vtheta"]:.2f}rad/s\n'
-                    f'  Obstacle: pos=({obs_map_x:.2f}, {obs_map_y:.2f})'
-                )
-        
         # Publish visualization
         self.publish_collision_visualization(
             pose, {'x': obs_map_x, 'y': obs_map_y},
