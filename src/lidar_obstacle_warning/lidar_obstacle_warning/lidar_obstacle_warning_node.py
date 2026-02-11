@@ -44,7 +44,7 @@ class ObstacleTracker(Node):
         # Total prediction time = fixed_offset + velocity_factor * robot_speed
         # Observed latency:  0.1m at 0.7m/s = ~0.143s
         self.collision_prediction_time_fixed = 0.15  # seconds - base latency compensation
-        self.collision_prediction_time_velocity_factor = 0.2  # seconds per m/s - velocity-dependent offset
+        self.collision_prediction_time_velocity_factor = 0.1  # seconds per m/s - velocity-dependent offset
         
         # Number of intermediate steps to check along trajectory
         self.prediction_steps = 5  # Check 5 intermediate positions (increased from 3)
