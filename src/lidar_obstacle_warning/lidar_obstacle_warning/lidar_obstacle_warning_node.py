@@ -40,8 +40,10 @@ class ObstacleTracker(Node):
         self.detection_threshold = 1.0  # meters
         
         # Collision prediction time horizon (accounts for system latency)
+        # Total prediction time = fixed_offset + velocity_factor * robot_speed
         # Observed latency:  0.1m at 0.7m/s = ~0.143s
-        self.collision_prediction_time = 0.3  # seconds
+        self.collision_prediction_time_fixed = 0.15  # seconds - base latency compensation
+        self.collision_prediction_time_velocity_factor = 0.2  # seconds per m/s - velocity-dependent offset
         
         # Number of intermediate steps to check along trajectory
         self.prediction_steps = 3  # Check 3 intermediate positions + final position
@@ -65,7 +67,7 @@ class ObstacleTracker(Node):
         # ============================================
 
         # Original parameters
-        self.scan_skip = 2
+        self.scan_skip = 1
         self.range_downsample = 1
         self.cluster_min_points = 5
         self.cluster_min_distance = 0.1
@@ -135,7 +137,8 @@ class ObstacleTracker(Node):
             f'  Robot size: {self.robot_length}m × {self.robot_width}m\n'
             f'  Obstacle radius: {self.obstacle_collision_radius}m\n'
             f'  Detection threshold: {self.detection_threshold}m\n'
-            f'  Prediction time:  {self.collision_prediction_time}s\n'
+            f'  Prediction time fixed: {self.collision_prediction_time_fixed}s\n'
+            f'  Prediction time velocity factor: {self.collision_prediction_time_velocity_factor}s per m/s\n'
             f'  Prediction steps: {self.prediction_steps}\n'
             f'  Obstacle filter alpha: {self.obstacle_filter_alpha}\n'
             f'  Rotation rate threshold: {self.rotation_rate_threshold} rad/s\n'
@@ -439,8 +442,6 @@ class ObstacleTracker(Node):
                 'timestamp': timestamp
             })
 
-        self._send_transform(pose)
-
     def _detect_new_obstacle(self, scan: LaserScan, pose: dict) -> bool:
         """
         Attempt to detect a new obstacle from scratch using map filtering.
@@ -589,6 +590,17 @@ class ObstacleTracker(Node):
     #
     # Collision Prediction Methods
     #
+    def get_collision_prediction_time(self):
+        """
+        Calculate dynamic collision prediction time based on robot velocity.
+        
+        Returns:
+            float: Total prediction time = fixed_offset + velocity_factor * robot_speed
+        """
+        vel = self.estimate_robot_velocity()
+        robot_speed = math.hypot(vel['vx'], vel['vy'])
+        return self.collision_prediction_time_fixed + self.collision_prediction_time_velocity_factor * robot_speed
+
     def estimate_robot_velocity(self):
         """Estimate robot velocity from pose history."""
         with self.lock:
@@ -810,8 +822,9 @@ class ObstacleTracker(Node):
         obstacle_trajectory = []
         
         # Check at prediction_steps intermediate points
+        prediction_time = self.get_collision_prediction_time()
         for step in range(1, self.prediction_steps + 1):
-            t = (step / self.prediction_steps) * self.collision_prediction_time
+            t = (step / self.prediction_steps) * prediction_time
             
             robot_pred = self.predict_robot_position(t)
             obs_pred = self.predict_obstacle_position(t)
