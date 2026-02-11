@@ -14,6 +14,7 @@ from visualization_msgs.msg import Marker
 from tf2_ros import TransformBroadcaster
 from rclpy.node import Node
 from std_msgs.msg import Int32
+from lidar_obstacle_warning_msgs.msg import EmergencyStop
 
 # QoS imports for transient-local map subscription
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy, HistoryPolicy
@@ -34,10 +35,10 @@ class ObstacleTracker(Node):
         self.robot_width = 0.3   # meters
         
         # Obstacle collision geometry (circle)
-        self.obstacle_collision_radius = 0.25  # meters
+        self.obstacle_collision_radius = 0.35  # meters
         
         # Detection threshold - start prediction when obstacle is within this distance
-        self.detection_threshold = 1.0  # meters
+        self.detection_threshold = 10  # meters (increased from 1.0 for better reaction time)
         
         # Collision prediction time horizon (accounts for system latency)
         # Total prediction time = fixed_offset + velocity_factor * robot_speed
@@ -46,7 +47,7 @@ class ObstacleTracker(Node):
         self.collision_prediction_time_velocity_factor = 0.2  # seconds per m/s - velocity-dependent offset
         
         # Number of intermediate steps to check along trajectory
-        self.prediction_steps = 3  # Check 3 intermediate positions + final position
+        self.prediction_steps = 5  # Check 5 intermediate positions (increased from 3)
         
         # History length for velocity estimation
         self.history_length = 5
@@ -56,9 +57,9 @@ class ObstacleTracker(Node):
         self.obstacle_filter_alpha = 0.4  # Smoothing factor (tune based on noise level)
         self.filtered_obstacle_map = None  # Stores filtered position in MAP frame (rotation-invariant)
         
-        # Rotation detection parameters - to prevent false obstacle movement during rotation
-        self.rotation_rate_threshold = 0.3  # rad/s - above this, robot is "rotating"
-        self.rotation_damping_alpha = 0.05  # Much lower alpha during rotation (heavy smoothing)
+        # Rotation detection parameters - use moderate filtering during rotation
+        self.rotation_rate_threshold = 0.5  # rad/s - increased from 0.3 to only trigger on significant rotation
+        self.rotation_filter_alpha = 0.25  # Moderate smoothing during rotation (was 0.05 which was too heavy)
         
         # Velocity histories
         self.robot_pose_history = deque(maxlen=self.history_length)
@@ -68,12 +69,13 @@ class ObstacleTracker(Node):
 
         # Original parameters
         self.scan_skip = 1
+        self.scan_skip = 1
         self.range_downsample = 1
         self.cluster_min_points = 5
         self.cluster_min_distance = 0.1
         self.cluster_max_diameter = 0.3
         self.close_threshold = 0.5
-        self.scan_tracking_stop_distance = 0.8
+        self.scan_tracking_stop_distance = 10  # Increased from 0.8m to maintain tracking lock
         self.min_point_distance = 0.2
 
         # Subscriptions / publishers
@@ -88,6 +90,7 @@ class ObstacleTracker(Node):
         self.create_subscription(Vector3, '/robot_pose_raw', self.pose_callback, 10)
         self.obstacle_pub = self.create_publisher(PoseStamped, '/obstacle_relative', 10)
         self.close_pub = self.create_publisher(Int32, '/emergency_break', 10)
+        self.emergency_stop_pub = self.create_publisher(EmergencyStop, '/emergency_stop', 10)
         self.marker_pub = self.create_publisher(Marker, '/obstacle_candidate_marker', 10)
         
         # New publishers for collision visualization
@@ -142,7 +145,7 @@ class ObstacleTracker(Node):
             f'  Prediction steps: {self.prediction_steps}\n'
             f'  Obstacle filter alpha: {self.obstacle_filter_alpha}\n'
             f'  Rotation rate threshold: {self.rotation_rate_threshold} rad/s\n'
-            f'  Rotation damping alpha: {self.rotation_damping_alpha}'
+            f'  Rotation filter alpha: {self.rotation_filter_alpha} (moderate filtering, not heavy damping)'
         )
 
     #
@@ -219,6 +222,7 @@ class ObstacleTracker(Node):
                         self.publish_obstacle(obs)
                         self.publish_marker(obs)
                         self.collision_check_callback()
+                        self.collision_check_callback()
                 else:
                     self._publish_delete_marker()
             return
@@ -260,6 +264,7 @@ class ObstacleTracker(Node):
                         self.publish_obstacle(obs)
                         self.publish_marker(obs)
                         self.collision_check_callback()
+                        self.collision_check_callback()
                 else:
                     self._publish_delete_marker()
             return
@@ -295,6 +300,7 @@ class ObstacleTracker(Node):
                     if obs:
                         self.publish_obstacle(obs)
                         self.publish_marker(obs)
+                        self.collision_check_callback()
                         self.collision_check_callback()
                 else:
                     self._publish_delete_marker()
@@ -389,12 +395,14 @@ class ObstacleTracker(Node):
                         self.publish_obstacle(obs)
                         self.publish_marker(obs)
                         self.collision_check_callback()
+                        self.collision_check_callback()
                 else:
                     self._publish_delete_marker()
             return
 
         self.publish_obstacle(obs)
         self.publish_marker(obs)
+        self.collision_check_callback()
         self.collision_check_callback()
 
     def map_callback(self, msg: OccupancyGrid):
@@ -503,6 +511,9 @@ class ObstacleTracker(Node):
                 self.filtered_obstacle_map = {'x': map_x, 'y': map_y}
                 self.tracked_obstacle = {'x': map_x, 'y': map_y}  # Stored in MAP frame
                 self.tracking = True
+                
+                # Clear old history and start fresh for the new obstacle
+                self.obstacle_position_history.clear()
                 
                 # Clear old history and start fresh for the new obstacle
                 self.obstacle_position_history.clear()
@@ -795,6 +806,10 @@ class ObstacleTracker(Node):
                 flag_msg = Int32()
                 flag_msg.data = 0
                 self.close_pub.publish(flag_msg)
+                # Clear emergency brake when not tracking
+                flag_msg = Int32()
+                flag_msg.data = 0
+                self.close_pub.publish(flag_msg)
                 return
             obs = self.tracked_obstacle.copy()  # Already in map frame
             pose = self.current_pose.copy()
@@ -808,6 +823,10 @@ class ObstacleTracker(Node):
         # Only predict if obstacle is within detection threshold
         if current_distance > self.detection_threshold:
             self.publish_collision_visualization(None, None, [], [], False, None)
+            # Clear emergency brake when obstacle is out of range
+            flag_msg = Int32()
+            flag_msg.data = 0
+            self.close_pub.publish(flag_msg)
             # Clear emergency brake when obstacle is out of range
             flag_msg = Int32()
             flag_msg.data = 0
@@ -851,11 +870,29 @@ class ObstacleTracker(Node):
             robot_trajectory, obstacle_trajectory,
             collision_detected, collision_time
         )
-        
+        # Publish custom EmergencyStop message
+        emergency_msg = EmergencyStop()
+        emergency_msg.emergency_triggered = 1 if collision_detected else 0
         if collision_detected:
+            robot_vel = self.estimate_robot_velocity()
+            robot_speed = math.hypot(robot_vel['vx'], robot_vel['vy'])
+            travel_distance = robot_speed * collision_time if collision_time else 0.0
+            emergency_msg.distance = float(travel_distance)
             self.get_logger().warn(
-                f'Collision predicted in {collision_time:.3f}s!  Emergency brake activated.'
-            )
+                    f'🚨 EMERGENCY STOP TRIGGERED!\n'
+                    f'  Travel distance: {emergency_msg.distance:.3f}m\n'
+                    f'  Obstacle: pos=({obs_map_x:.2f}, {obs_map_y:.2f})'
+                    f'My robot : x: {pose["x"]:.2f}, y: {pose["y"]:.2f}°\n'
+                )
+        else:
+            emergency_msg.distance = 0.0
+        # Publish visualization
+        self.publish_collision_visualization(
+            pose, {'x': obs_map_x, 'y': obs_map_y},
+            robot_trajectory, obstacle_trajectory,
+            collision_detected, collision_time
+        )
+        self.emergency_stop_pub.publish(emergency_msg)
 
     def publish_collision_visualization(self, current_robot, current_obstacle,
                                        robot_trajectory, obstacle_trajectory,

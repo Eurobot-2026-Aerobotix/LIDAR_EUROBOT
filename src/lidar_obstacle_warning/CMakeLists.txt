@@ -1,19 +1,14 @@
 cmake_minimum_required(VERSION 3.8)
-project(robot_description)
+project(lidar_obstacle_warning)
 
-find_package(ament_cmake REQUIRED)
+find_package(ament_cmake_python REQUIRED)
 
-# Install URDF and meshes
-install(
-  DIRECTORY urdf meshes
-  DESTINATION share/${PROJECT_NAME}
-)
+ament_python_install_package(${PROJECT_NAME})
 
-# Optionally install launch files
-install(
-  DIRECTORY launch
-  DESTINATION share/${PROJECT_NAME}
-  OPTIONAL
+install(PROGRAMS
+  lidar_obstacle_warning/lidar_obstacle_warning_node.py
+  DESTINATION lib/${PROJECT_NAME}
 )
 
 ament_package()
+
