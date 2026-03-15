@@ -41,10 +41,13 @@ class ObstacleTracker(Node):
         self.detection_threshold = 10  # meters (increased from 1.0 for better reaction time)
         
         # Collision prediction time horizon (accounts for system latency)
-        # Total prediction time = fixed_offset + velocity_factor * robot_speed
+        # Total prediction time = fixed_offset
+        #                       + robot_velocity_factor * robot_speed
+        #                       + obstacle_velocity_factor * obstacle_speed
         # Observed latency:  0.1m at 0.7m/s = ~0.143s
         self.collision_prediction_time_fixed = 0.15  # seconds - base latency compensation
-        self.collision_prediction_time_velocity_factor = 0.1  # seconds per m/s - velocity-dependent offset
+        self.collision_prediction_time_velocity_factor = 0.1  # seconds per m/s - robot velocity-dependent offset
+        self.collision_prediction_time_obstacle_velocity_factor = 0.1  # seconds per m/s - obstacle velocity-dependent offset
         
         # Number of intermediate steps to check along trajectory
         self.prediction_steps = 5  # Check 5 intermediate positions (increased from 3)
@@ -141,7 +144,8 @@ class ObstacleTracker(Node):
             f'  Obstacle radius: {self.obstacle_collision_radius}m\n'
             f'  Detection threshold: {self.detection_threshold}m\n'
             f'  Prediction time fixed: {self.collision_prediction_time_fixed}s\n'
-            f'  Prediction time velocity factor: {self.collision_prediction_time_velocity_factor}s per m/s\n'
+            f'  Prediction time robot velocity factor: {self.collision_prediction_time_velocity_factor}s per m/s\n'
+            f'  Prediction time obstacle velocity factor: {self.collision_prediction_time_obstacle_velocity_factor}s per m/s\n'
             f'  Prediction steps: {self.prediction_steps}\n'
             f'  Obstacle filter alpha: {self.obstacle_filter_alpha}\n'
             f'  Rotation rate threshold: {self.rotation_rate_threshold} rad/s\n'
@@ -606,11 +610,19 @@ class ObstacleTracker(Node):
         Calculate dynamic collision prediction time based on robot velocity.
         
         Returns:
-            float: Total prediction time = fixed_offset + velocity_factor * robot_speed
+            float: Total prediction time = fixed_offset
+                   + robot_velocity_factor * robot_speed
+                   + obstacle_velocity_factor * obstacle_speed
         """
-        vel = self.estimate_robot_velocity()
-        robot_speed = math.hypot(vel['vx'], vel['vy'])
-        return self.collision_prediction_time_fixed + self.collision_prediction_time_velocity_factor * robot_speed
+        robot_vel = self.estimate_robot_velocity()
+        obstacle_vel = self.estimate_obstacle_velocity()
+        robot_speed = math.hypot(robot_vel['vx'], robot_vel['vy'])
+        obstacle_speed = math.hypot(obstacle_vel['vx'], obstacle_vel['vy'])
+        return (
+            self.collision_prediction_time_fixed
+            + self.collision_prediction_time_velocity_factor * robot_speed
+            + self.collision_prediction_time_obstacle_velocity_factor * obstacle_speed
+        )
 
     def estimate_robot_velocity(self):
         """Estimate robot velocity from pose history."""
