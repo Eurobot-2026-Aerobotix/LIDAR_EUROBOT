@@ -45,9 +45,9 @@ class ObstacleTracker(Node):
         #                       + robot_velocity_factor * robot_speed
         #                       + obstacle_velocity_factor * obstacle_speed
         # Observed latency:  0.1m at 0.7m/s = ~0.143s
-        self.collision_prediction_time_fixed = 0.15  # seconds - base latency compensation
-        self.collision_prediction_time_velocity_factor = 0.5  # seconds per m/s - robot velocity-dependent offset
-        self.collision_prediction_time_obstacle_velocity_factor = 1.0  # seconds per m/s - obstacle velocity-dependent offset
+        self.collision_prediction_time_fixed = 0.16  # seconds - base latency compensation
+        self.collision_prediction_time_velocity_factor = 0.40  # seconds per m/s - robot velocity-dependent offset
+        self.collision_prediction_time_obstacle_velocity_factor = 0.35  # seconds per m/s - obstacle velocity-dependent offset
         
         # Number of intermediate steps to check along trajectory
         self.prediction_steps = 5  # Check 5 intermediate positions (increased from 3)
@@ -67,9 +67,12 @@ class ObstacleTracker(Node):
 
         # Safety margin tuning for LD19 @ 10Hz and fast relative motion
         self.scan_rate_hz = 10.0
-        self.emergency_reaction_time = 0.12  # seconds
-        self.base_safety_margin = 0.10       # meters
+        self.emergency_reaction_time = 0.07  # seconds
+        self.base_safety_margin = 0.03       # meters
         self.max_safety_margin = 0.60        # meters
+        self.reaction_time_scale = 0.40      # less conservative for static scenes
+        self.static_obstacle_speed_threshold = 0.60  # m/s
+        self.static_dynamic_margin_scale = 0.20  # Scale down margin for static obstacles to avoid over-triggering
         
         # Velocity histories
         self.robot_pose_history = deque(maxlen=self.history_length)
@@ -768,16 +771,41 @@ class ObstacleTracker(Node):
     def get_dynamic_collision_radius(self) -> float:
         """
         Dynamic collision radius to compensate for sensing and stopping delay.
+        Uses line-of-sight closing speed (not total speed) to avoid
+        over-triggering for static/lateral obstacles.
         """
         robot_vel = self.estimate_robot_velocity()
         obstacle_vel = self.estimate_obstacle_velocity()
+
+        with self.lock:
+            pose = None if self.current_pose is None else self.current_pose.copy()
+            obs = None if self.tracked_obstacle is None else self.tracked_obstacle.copy()
+
         robot_speed = math.hypot(robot_vel['vx'], robot_vel['vy'])
         obstacle_speed = math.hypot(obstacle_vel['vx'], obstacle_vel['vy'])
-        relative_speed = robot_speed + obstacle_speed
+
+        if pose is not None and obs is not None:
+            dx = obs['x'] - pose['x']
+            dy = obs['y'] - pose['y']
+            dist = math.hypot(dx, dy)
+            if dist > 1e-6:
+                ux = dx / dist
+                uy = dy / dist
+                robot_toward = max(0.0, robot_vel['vx'] * ux + robot_vel['vy'] * uy)
+                obstacle_toward = max(0.0, -(obstacle_vel['vx'] * ux + obstacle_vel['vy'] * uy))
+                closing_speed = robot_toward + obstacle_toward
+            else:
+                closing_speed = robot_speed + obstacle_speed
+        else:
+            closing_speed = robot_speed + obstacle_speed
+
+        motion_scale = 1.0
+        if obstacle_speed < self.static_obstacle_speed_threshold:
+            motion_scale = self.static_dynamic_margin_scale
 
         scan_period = 1.0 / max(self.scan_rate_hz, 1e-6)
-        delay = scan_period + self.emergency_reaction_time
-        dynamic_margin = self.base_safety_margin + relative_speed * delay
+        delay = scan_period + self.emergency_reaction_time * self.reaction_time_scale
+        dynamic_margin = self.base_safety_margin + closing_speed * delay * motion_scale
         dynamic_margin = max(0.0, min(self.max_safety_margin, dynamic_margin))
 
         return self.obstacle_collision_radius + dynamic_margin
@@ -938,6 +966,8 @@ class ObstacleTracker(Node):
             delete_marker.action = Marker.DELETEALL
             self.collision_viz_pub.publish(delete_marker)
             return
+
+        effective_collision_radius = self.get_dynamic_collision_radius()
         
         # Current robot rectangle (solid green)
         marker_id = self._publish_rectangle_marker(
@@ -948,7 +978,8 @@ class ObstacleTracker(Node):
         # Current obstacle circle (solid blue)
         marker_id = self._publish_circle_marker(
             current_obstacle, marker_id, 'current_obstacle',
-            (0.0, 0.0, 1.0, 0.5)  # Blue, semi-transparent
+            (0.0, 0.0, 1.0, 0.5),  # Blue, semi-transparent
+            radius=effective_collision_radius,
         )
         
         # Predicted trajectory - robot rectangles (faded)
@@ -968,7 +999,8 @@ class ObstacleTracker(Node):
                 alpha = 0.1
             color = (1.0, 0.0, 0.0, alpha) if collision_detected else (0.0, 0.0, 1.0, alpha)
             marker_id = self._publish_circle_marker(
-                obs_pos, marker_id, f'predicted_obstacle_{i}', color
+                obs_pos, marker_id, f'predicted_obstacle_{i}', color,
+                radius=effective_collision_radius,
             )
 
     def _publish_rectangle_marker(self, pose, marker_id, ns, color):
@@ -1007,7 +1039,7 @@ class ObstacleTracker(Node):
         self.collision_viz_pub.publish(marker)
         return marker_id + 1
 
-    def _publish_circle_marker(self, pos, marker_id, ns, color):
+    def _publish_circle_marker(self, pos, marker_id, ns, color, radius: Optional[float] = None):
         """Publish a circle marker for the obstacle."""
         marker = Marker()
         marker.header.frame_id = 'map'
@@ -1021,9 +1053,10 @@ class ObstacleTracker(Node):
         marker.pose.position.y = pos['y']
         marker.pose.position.z = 0.0
         marker.pose.orientation.w = 1.0
-        
-        marker.scale.x = self.obstacle_collision_radius * 2.0
-        marker.scale.y = self.obstacle_collision_radius * 2.0
+
+        circle_radius = self.obstacle_collision_radius if radius is None else float(radius)
+        marker.scale.x = circle_radius * 2.0
+        marker.scale.y = circle_radius * 2.0
         marker.scale.z = 0.1
         
         marker.color.r = color[0]
