@@ -71,8 +71,31 @@ class ObstacleTracker(Node):
         self.base_safety_margin = 0.03       # meters
         self.max_safety_margin = 0.60        # meters
         self.reaction_time_scale = 0.40      # less conservative for static scenes
-        self.static_obstacle_speed_threshold = 0.60  # m/s
+        self.static_obstacle_speed_threshold = 0.20  # m/s
         self.static_dynamic_margin_scale = 0.20  # Scale down margin for static obstacles to avoid over-triggering
+
+        # Supervisor-based safety logic (recommended primary stop criterion)
+        self.use_supervisor_logic = True
+        self.use_dynamic_radius_for_geometry = False
+        self.robot_collision_radius = 0.5 * math.hypot(self.robot_length, self.robot_width)
+        self.supervisor_brake_deceleration = 1.3   # m/s^2 conservative effective braking
+        self.supervisor_total_latency = 0.24       # s sensing + compute + command + actuation
+        self.supervisor_buffer = 0.07              # m model and estimation uncertainty
+        self.supervisor_ttc_critical = 0.70        # s emergency trigger threshold
+        self.supervisor_ttc_release = 0.85         # s hysteresis release threshold
+        self.supervisor_release_margin = 0.10      # m hysteresis on safe clearance
+        self.supervisor_min_hold_time = 0.20       # s minimum hold after trigger
+        self.supervisor_geometry_ttc_gate = 0.40   # s: allow geometry to trigger only for near-term risk
+        self.supervisor_geometry_clearance_gate = 0.04  # m: allow geometry if very close to required clearance
+        self.supervisor_max_robot_speed = 1.4       # m/s clamp for noisy speed estimates
+        self.supervisor_max_closing_speed = 2.5     # m/s clamp for noisy relative speed estimates
+        self.supervisor_static_closing_threshold = 0.20  # m/s
+        self.supervisor_static_clearance_relax = 0.04    # m reduce required clearance in near-static approach
+        self.supervisor_emergency_active = False
+        self.supervisor_last_trigger_time = 0.0
+        self.supervisor_debug_logs = True
+        self.supervisor_debug_log_period = 0.5  # seconds
+        self.supervisor_last_debug_log_time = 0.0
         
         # Velocity histories
         self.robot_pose_history = deque(maxlen=self.history_length)
@@ -162,7 +185,11 @@ class ObstacleTracker(Node):
             f'  Rotation rate threshold: {self.rotation_rate_threshold} rad/s\n'
             f'  Rotation filter alpha: {self.rotation_filter_alpha} (moderate filtering, not heavy damping)\n'
             f'  Scan rate: {self.scan_rate_hz}Hz, reaction time: {self.emergency_reaction_time}s\n'
-            f'  Safety margin: base={self.base_safety_margin}m, max={self.max_safety_margin}m'
+            f'  Safety margin: base={self.base_safety_margin}m, max={self.max_safety_margin}m\n'
+            f'  Supervisor: enabled={self.use_supervisor_logic}, a_brake={self.supervisor_brake_deceleration}m/s^2, '
+            f'latency={self.supervisor_total_latency}s, buffer={self.supervisor_buffer}m, '
+            f'ttc_crit={self.supervisor_ttc_critical}s, geom_ttc_gate={self.supervisor_geometry_ttc_gate}s\n'
+            f'  Supervisor debug logs: {self.supervisor_debug_logs}, period={self.supervisor_debug_log_period}s'
         )
 
     #
@@ -619,7 +646,8 @@ class ObstacleTracker(Node):
         """
         robot_vel = self.estimate_robot_velocity()
         obstacle_vel = self.estimate_obstacle_velocity()
-        robot_speed = math.hypot(robot_vel['vx'], robot_vel['vy'])
+        robot_speed_raw = math.hypot(robot_vel['vx'], robot_vel['vy'])
+        robot_speed = min(robot_speed_raw, self.supervisor_max_robot_speed)
         obstacle_speed = math.hypot(obstacle_vel['vx'], obstacle_vel['vy'])
         return (
             self.collision_prediction_time_fixed
@@ -781,7 +809,7 @@ class ObstacleTracker(Node):
             pose = None if self.current_pose is None else self.current_pose.copy()
             obs = None if self.tracked_obstacle is None else self.tracked_obstacle.copy()
 
-        robot_speed = math.hypot(robot_vel['vx'], robot_vel['vy'])
+        robot_speed = min(math.hypot(robot_vel['vx'], robot_vel['vy']), self.supervisor_max_robot_speed)
         obstacle_speed = math.hypot(obstacle_vel['vx'], obstacle_vel['vy'])
 
         if pose is not None and obs is not None:
@@ -809,6 +837,80 @@ class ObstacleTracker(Node):
         dynamic_margin = max(0.0, min(self.max_safety_margin, dynamic_margin))
 
         return self.obstacle_collision_radius + dynamic_margin
+
+    def _compute_supervisor_metrics(self, pose: dict, obs: dict, robot_vel: dict, obstacle_vel: dict) -> dict:
+        """Compute stopping-distance and TTC metrics for emergency supervision."""
+        dx = obs['x'] - pose['x']
+        dy = obs['y'] - pose['y']
+        center_distance = math.hypot(dx, dy)
+
+        combined_collision_radius = self.robot_collision_radius + self.obstacle_collision_radius
+        clearance = max(0.0, center_distance - combined_collision_radius)
+
+        robot_speed = math.hypot(robot_vel['vx'], robot_vel['vy'])
+        if center_distance > 1e-6:
+            ux = dx / center_distance
+            uy = dy / center_distance
+            rel_vx = robot_vel['vx'] - obstacle_vel['vx']
+            rel_vy = robot_vel['vy'] - obstacle_vel['vy']
+            closing_speed = max(0.0, rel_vx * ux + rel_vy * uy)
+        else:
+            closing_speed = robot_speed
+
+        closing_speed = min(closing_speed, self.supervisor_max_closing_speed)
+
+        brake_decel = max(self.supervisor_brake_deceleration, 1e-6)
+        stopping_distance = (robot_speed * robot_speed) / (2.0 * brake_decel)
+        latency_distance = robot_speed * self.supervisor_total_latency
+        required_clearance = stopping_distance + latency_distance + self.supervisor_buffer
+
+        # Static/near-static case: slightly relax required clearance to avoid
+        # unnecessary early stop while preserving dynamic safety behavior.
+        if closing_speed < self.supervisor_static_closing_threshold:
+            required_clearance = max(0.0, required_clearance - self.supervisor_static_clearance_relax)
+
+        if closing_speed <= 1e-4:
+            ttc = float('inf')
+        else:
+            ttc = clearance / closing_speed
+
+        trigger_now = (clearance <= required_clearance) or (ttc <= self.supervisor_ttc_critical)
+        return {
+            'center_distance': center_distance,
+            'clearance': clearance,
+            'closing_speed': closing_speed,
+            'stopping_distance': stopping_distance,
+            'latency_distance': latency_distance,
+            'required_clearance': required_clearance,
+            'ttc': ttc,
+            'trigger_now': trigger_now,
+        }
+
+    def _apply_supervisor_hysteresis(self, metrics: dict) -> bool:
+        """Apply hold/release hysteresis for stable emergency output."""
+        now = self.get_clock().now().nanoseconds / 1e9
+        trigger_now = metrics['trigger_now']
+
+        if trigger_now:
+            self.supervisor_emergency_active = True
+            self.supervisor_last_trigger_time = now
+            return True
+
+        if not self.supervisor_emergency_active:
+            return False
+
+        # Keep emergency asserted for minimum hold time
+        if (now - self.supervisor_last_trigger_time) < self.supervisor_min_hold_time:
+            return True
+
+        clear_release = metrics['clearance'] > (metrics['required_clearance'] + self.supervisor_release_margin)
+        ttc_release = metrics['ttc'] > self.supervisor_ttc_release
+
+        if clear_release and ttc_release:
+            self.supervisor_emergency_active = False
+            return False
+
+        return True
 
     def _point_in_rectangle(self, px, py, corners):
         """Check if point (px, py) is inside rectangle defined by corners."""
@@ -856,16 +958,17 @@ class ObstacleTracker(Node):
     def collision_check_callback(self):
         """Periodic callback to check for future collisions along trajectory."""
         with self.lock:
-            if not self.tracking or self.tracked_obstacle is None or self.current_pose is None:
-                # Clear visualization if not tracking
-                self.publish_collision_visualization(None, None, [], [], False, None)
-                # Clear emergency brake when not tracking
-                flag_msg = Int32()
-                flag_msg.data = 0
-                self.close_pub.publish(flag_msg)
-                return
-            obs = self.tracked_obstacle.copy()  # Already in map frame
-            pose = self.current_pose.copy()
+            tracking = self.tracking
+            obs = None if self.tracked_obstacle is None else self.tracked_obstacle.copy()
+            pose = None if self.current_pose is None else self.current_pose.copy()
+
+        if (not tracking) or obs is None or pose is None:
+            self.publish_collision_visualization(None, None, [], [], False, None)
+            flag_msg = Int32()
+            flag_msg.data = 0
+            self.close_pub.publish(flag_msg)
+            self.supervisor_emergency_active = False
+            return
         
         # tracked_obstacle is already in map frame - no conversion needed
         obs_map_x = obs['x']
@@ -883,9 +986,13 @@ class ObstacleTracker(Node):
             return
         
         # Check collision at intermediate steps along the trajectory
-        collision_detected = False
+        collision_detected_geom = False
         collision_time = None
-        effective_collision_radius = self.get_dynamic_collision_radius()
+        effective_collision_radius = (
+            self.get_dynamic_collision_radius()
+            if self.use_dynamic_radius_for_geometry
+            else self.obstacle_collision_radius
+        )
         
         robot_trajectory = []
         obstacle_trajectory = []
@@ -896,12 +1003,12 @@ class ObstacleTracker(Node):
             {'x': obs_map_x, 'y': obs_map_y},
             collision_radius=effective_collision_radius,
         ):
-            collision_detected = True
+            collision_detected_geom = True
             collision_time = 0.0
         
         # Check at prediction_steps intermediate points
         prediction_time = self.get_collision_prediction_time()
-        if not collision_detected:
+        if not collision_detected_geom:
             for step in range(1, self.prediction_steps + 1):
                 t = (step / self.prediction_steps) * prediction_time
 
@@ -919,9 +1026,43 @@ class ObstacleTracker(Node):
                     obs_pred,
                     collision_radius=effective_collision_radius,
                 ):
-                    collision_detected = True
+                    collision_detected_geom = True
                     collision_time = t
                     break  # Stop checking further if collision found
+
+        robot_vel = self.estimate_robot_velocity()
+        obstacle_vel = self.estimate_obstacle_velocity()
+        supervisor_metrics = self._compute_supervisor_metrics(pose, obs, robot_vel, obstacle_vel)
+        if self.use_supervisor_logic:
+            collision_detected_supervisor = self._apply_supervisor_hysteresis(supervisor_metrics)
+        else:
+            collision_detected_supervisor = False
+
+        # Geometry is a secondary guard. Gate it with supervisor context to avoid
+        # early triggers when TTC is large/infinite and clearance is comfortably safe.
+        geometry_guard_trigger = collision_detected_geom and (
+            (supervisor_metrics['ttc'] <= self.supervisor_geometry_ttc_gate)
+            or (
+                supervisor_metrics['clearance']
+                <= (supervisor_metrics['required_clearance'] + self.supervisor_geometry_clearance_gate)
+            )
+        )
+
+        collision_detected = collision_detected_supervisor or geometry_guard_trigger
+
+        if self.supervisor_debug_logs:
+            now = self.get_clock().now().nanoseconds / 1e9
+            if (now - self.supervisor_last_debug_log_time) >= self.supervisor_debug_log_period:
+                self.supervisor_last_debug_log_time = now
+                ttc_str = f"{supervisor_metrics['ttc']:.2f}" if math.isfinite(supervisor_metrics['ttc']) else 'inf'
+                self.get_logger().info(
+                    f"SUPERVISOR_METRICS clr={supervisor_metrics['clearance']:.3f}m "
+                    f"req={supervisor_metrics['required_clearance']:.3f}m "
+                    f"close_v={supervisor_metrics['closing_speed']:.3f}m/s "
+                    f"ttc={ttc_str}s "
+                    f"geom={int(collision_detected_geom)} geom_gate={int(geometry_guard_trigger)} "
+                    f"sup={int(collision_detected_supervisor)} final={int(collision_detected)}"
+                )
         
         # Publish emergency brake signal
         flag_msg = Int32()
@@ -938,14 +1079,19 @@ class ObstacleTracker(Node):
         emergency_msg = EmergencyStop()
         emergency_msg.emergency_triggered = 1 if collision_detected else 0
         if collision_detected:
-            robot_vel = self.estimate_robot_velocity()
             robot_speed = math.hypot(robot_vel['vx'], robot_vel['vy'])
-            travel_distance = robot_speed * collision_time if collision_time else 0.0
+            if collision_time is not None:
+                travel_distance = robot_speed * collision_time
+            else:
+                travel_distance = supervisor_metrics['required_clearance']
             emergency_msg.distance = float(travel_distance)
             self.get_logger().warn(
                     f'🚨 EMERGENCY STOP TRIGGERED!\n'
                     f'  Travel distance: {emergency_msg.distance:.3f}m\n'
-                    f'  Obstacle: pos=({obs_map_x:.2f}, {obs_map_y:.2f})'
+                    f'  Clearance: {supervisor_metrics["clearance"]:.3f}m '
+                    f'(required: {supervisor_metrics["required_clearance"]:.3f}m), '
+                    f'TTC: {supervisor_metrics["ttc"]:.2f}s\n'
+                    f'  Obstacle: pos=({obs_map_x:.2f}, {obs_map_y:.2f}) '
                     f'My robot : x: {pose["x"]:.2f}, y: {pose["y"]:.2f}°\n'
                 )
         else:
@@ -967,7 +1113,11 @@ class ObstacleTracker(Node):
             self.collision_viz_pub.publish(delete_marker)
             return
 
-        effective_collision_radius = self.get_dynamic_collision_radius()
+        effective_collision_radius = (
+            self.get_dynamic_collision_radius()
+            if self.use_dynamic_radius_for_geometry
+            else self.obstacle_collision_radius
+        )
         
         # Current robot rectangle (solid green)
         marker_id = self._publish_rectangle_marker(
