@@ -7,7 +7,7 @@ from collections import deque
 
 import numpy as np
 import rclpy
-from geometry_msgs.msg import PoseStamped, Vector3, TransformStamped
+from geometry_msgs.msg import PoseStamped, Vector3, TransformStamped, Twist
 from nav_msgs.msg import OccupancyGrid
 from sensor_msgs.msg import LaserScan
 from visualization_msgs.msg import Marker
@@ -125,6 +125,7 @@ class ObstacleTracker(Node):
 
         self.create_subscription(Vector3, '/robot_pose_raw', self.pose_callback, 10)
         self.obstacle_pub = self.create_publisher(PoseStamped, '/obstacle_relative', 10)
+        self.obstacle_speed_pub = self.create_publisher(Twist, '/obstacle_relative_speed', 10)
         self.close_pub = self.create_publisher(Int32, '/emergency_break', 10)
         self.emergency_stop_pub = self.create_publisher(EmergencyStop, '/emergency_stop', 10)
         self.marker_pub = self.create_publisher(Marker, '/obstacle_candidate_marker', 10)
@@ -152,6 +153,7 @@ class ObstacleTracker(Node):
 
         # Reused message objects
         self._pose_msg = PoseStamped()
+        self._twist_msg = Twist()
         self._marker_msg = Marker()
         self._marker_msg.ns = 'obstacle'
         self._marker_msg.id = 0
@@ -1423,6 +1425,15 @@ class ObstacleTracker(Node):
         self._pose_msg.pose.orientation.z = 0.0
         self._pose_msg.pose.orientation.w = 1.0
         self.obstacle_pub.publish(self._pose_msg)
+
+        obstacle_vel = self.estimate_obstacle_velocity()
+        self._twist_msg.linear.x = float(obstacle_vel['vx'])
+        self._twist_msg.linear.y = float(obstacle_vel['vy'])
+        self._twist_msg.linear.z = 0.0
+        self._twist_msg.angular.x = 0.0
+        self._twist_msg.angular.y = 0.0
+        self._twist_msg.angular.z = 0.0
+        self.obstacle_speed_pub.publish(self._twist_msg)
 
     def publish_marker(self, obs: dict):
         """Publish obstacle marker. obs is in MAP frame."""
