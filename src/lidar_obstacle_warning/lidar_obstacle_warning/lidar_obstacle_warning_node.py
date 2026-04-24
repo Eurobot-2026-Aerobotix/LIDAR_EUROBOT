@@ -64,6 +64,7 @@ class ObstacleTracker(Node):
         self.rotation_rate_threshold = 0.5  # rad/s - increased from 0.3 to only trigger on significant rotation
         self.rotation_filter_alpha = 0.25  # Moderate smoothing during rotation (was 0.05 which was too heavy)
         self.rotation_damping_alpha = self.rotation_filter_alpha
+        self.obstacle_rotation_factor = 0.5  # Apply only a fraction of pose yaw to obstacle-relative rotation
 
         # Safety margin tuning for LD19 @ 10Hz and fast relative motion
         self.scan_rate_hz = 10.0
@@ -100,6 +101,11 @@ class ObstacleTracker(Node):
         # Velocity histories
         self.robot_pose_history = deque(maxlen=self.history_length)
         self.obstacle_position_history = deque(maxlen=self.history_length)
+        self.current_angular_velocity = 0.0
+        self.frozen_obstacle_map = None
+        self.filtered_obstacle_speed = None
+        self.obstacle_speed_filter_alpha = 0.35
+        self.obstacle_speed_zero_threshold = 0.1  # m/s deadband for published obstacle speed
         
         # ============================================
 
@@ -412,14 +418,6 @@ class ObstacleTracker(Node):
                 else:
                     # Store tracked_obstacle in MAP FRAME
                     self.tracked_obstacle = {'x': self.filtered_obstacle_map['x'], 'y': self.filtered_obstacle_map['y']}
-                    
-                    timestamp = self.get_clock().now().nanoseconds / 1e9
-                    # Store map-frame position in history (no pose needed for conversion)
-                    self.obstacle_position_history.append({
-                        'x': self.tracked_obstacle['x'],
-                        'y': self.tracked_obstacle['y'],
-                        'timestamp': timestamp
-                    })
                     obs = self.tracked_obstacle.copy()
         
         # If tracking was reset, try re-detection
@@ -478,6 +476,18 @@ class ObstacleTracker(Node):
         timestamp = self.get_clock().now().nanoseconds / 1e9
         
         with self.lock:
+            if len(self.robot_pose_history) > 0:
+                prev_pose = self.robot_pose_history[-1]
+                dt = timestamp - prev_pose['timestamp']
+                if dt > 1e-6:
+                    dtheta = pose['theta'] - prev_pose['theta']
+                    dtheta = math.atan2(math.sin(dtheta), math.cos(dtheta))
+                    self.current_angular_velocity = dtheta / dt
+                else:
+                    self.current_angular_velocity = 0.0
+            else:
+                self.current_angular_velocity = 0.0
+
             self.current_pose = pose
             self.robot_pose_history.append({
                 'x': pose['x'],
@@ -550,17 +560,7 @@ class ObstacleTracker(Node):
                 
                 # Clear old history and start fresh for the new obstacle
                 self.obstacle_position_history.clear()
-                
-                # Clear old history and start fresh for the new obstacle
-                self.obstacle_position_history.clear()
-                
-                timestamp = self.get_clock().now().nanoseconds / 1e9
-                # Store map-frame position in history (no pose needed)
-                self.obstacle_position_history.append({
-                    'x': self.tracked_obstacle['x'],
-                    'y': self.tracked_obstacle['y'],
-                    'timestamp': timestamp
-                })
+                self.filtered_obstacle_speed = None
             return True
         
         # No valid obstacle found
@@ -683,8 +683,8 @@ class ObstacleTracker(Node):
         """
         Estimate obstacle velocity from position history.
         
-        Since tracked_obstacle is now stored in MAP frame, we can directly
-        compute velocity from the history without coordinate transformations.
+        The history is built from the published obstacle position, so the
+        published speed reflects what the user sees on /obstacle_relative.
         """
         with self.lock:
             if len(self.obstacle_position_history) < 2:
@@ -1414,9 +1414,32 @@ class ObstacleTracker(Node):
     #
     def publish_obstacle(self, obs: dict):
         """Publish obstacle position. obs is in MAP frame."""
+        with self.lock:
+            current_vtheta = float(self.current_angular_velocity)
+
+        is_rotating = abs(current_vtheta) > self.rotation_rate_threshold
+
+        with self.lock:
+            if is_rotating:
+                if self.frozen_obstacle_map is None:
+                    self.frozen_obstacle_map = {'x': float(obs['x']), 'y': float(obs['y'])}
+                publish_obs = self.frozen_obstacle_map.copy()
+            else:
+                self.frozen_obstacle_map = {'x': float(obs['x']), 'y': float(obs['y'])}
+                publish_obs = self.frozen_obstacle_map.copy()
+
+            timestamp = self.get_clock().now().nanoseconds / 1e9
+            self.obstacle_position_history.append({
+                'x': publish_obs['x'],
+                'y': publish_obs['y'],
+                'timestamp': timestamp,
+            })
+
+        # Keep the published obstacle fixed in map frame while rotating, then
+        # resume normal updates once rotation stops.
         self._pose_msg.header.frame_id = 'map'
-        self._pose_msg.pose.position.x = float(obs['x'])
-        self._pose_msg.pose.position.y = float(obs['y'])
+        self._pose_msg.pose.position.x = publish_obs['x']
+        self._pose_msg.pose.position.y = publish_obs['y']
             
         self._pose_msg.header.stamp = self.get_clock().now().to_msg()
         self._pose_msg.pose.position.z = 0.0
@@ -1426,9 +1449,28 @@ class ObstacleTracker(Node):
         self._pose_msg.pose.orientation.w = 1.0
         self.obstacle_pub.publish(self._pose_msg)
 
-        obstacle_vel = self.estimate_obstacle_velocity()
-        self._twist_msg.linear.x = float(obstacle_vel['vx'])
-        self._twist_msg.linear.y = float(obstacle_vel['vy'])
+        if is_rotating:
+            filtered_obstacle_vel = {'vx': 0.0, 'vy': 0.0}
+            with self.lock:
+                self.filtered_obstacle_speed = filtered_obstacle_vel.copy()
+        else:
+            obstacle_vel = self.estimate_obstacle_velocity()
+            with self.lock:
+                if self.filtered_obstacle_speed is None:
+                    self.filtered_obstacle_speed = obstacle_vel.copy()
+                else:
+                    alpha = float(self.obstacle_speed_filter_alpha)
+                    self.filtered_obstacle_speed['vx'] = alpha * obstacle_vel['vx'] + (1.0 - alpha) * self.filtered_obstacle_speed['vx']
+                    self.filtered_obstacle_speed['vy'] = alpha * obstacle_vel['vy'] + (1.0 - alpha) * self.filtered_obstacle_speed['vy']
+                filtered_obstacle_vel = self.filtered_obstacle_speed.copy()
+
+        speed_mag = math.hypot(filtered_obstacle_vel['vx'], filtered_obstacle_vel['vy'])
+        if speed_mag < self.obstacle_speed_zero_threshold:
+            filtered_obstacle_vel['vx'] = 0.0
+            filtered_obstacle_vel['vy'] = 0.0
+
+        self._twist_msg.linear.x = float(filtered_obstacle_vel['vx'])
+        self._twist_msg.linear.y = float(filtered_obstacle_vel['vy'])
         self._twist_msg.linear.z = 0.0
         self._twist_msg.angular.x = 0.0
         self._twist_msg.angular.y = 0.0
